@@ -1,0 +1,297 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+"""omso — OpenMSO command-line frontend.
+
+Launches a capture plugin as a subprocess, speaks OCP to it over stdio, and
+writes captures as sigrok-compatible .sr files (plus optional CSV).
+
+Examples:
+  omso scan    --plugin sds1000xe --address 192.168.1.155
+  omso info    --plugin sds1000xe --address 192.168.1.155
+  omso capture --plugin sds1000xe --address 192.168.1.155 \
+               --channels C1,C3 --mode single -o cal.sr --csv cal.csv
+  omso raw     --plugin sds1000xe --address 192.168.1.155 "SARA?"
+"""
+
+import argparse
+import json
+import os
+import sys
+import threading
+import time
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(REPO_ROOT, "python"))
+
+import numpy as np
+
+from openmso.client import PluginClient, PluginError, find_plugin
+from openmso.srzip import SrZipWriter
+
+
+def launch(args, handler=None):
+    argv, _manifest = find_plugin(args.plugin, REPO_ROOT)
+    client = PluginClient.launch(argv, notification_handler=handler)
+    client.initialize("omso")
+    return client
+
+
+def pick_device(client, args):
+    hints = {}
+    if args.address:
+        hints["address"] = args.address
+    devices = client.request("scan", {"hints": hints})["devices"]
+    if not devices:
+        sys.exit("omso: no devices found")
+    if args.device:
+        matches = [d for d in devices if args.device in d["device_id"]]
+        if not matches:
+            sys.exit(f"omso: no device matching {args.device!r}")
+        return matches[0]
+    return devices[0]
+
+
+def cmd_scan(args):
+    client = launch(args, handler=_log_handler)
+    try:
+        hints = {"address": args.address} if args.address else {}
+        devices = client.request("scan", {"hints": hints})["devices"]
+        if not devices:
+            print("no devices found")
+        for d in devices:
+            print(f"{d['device_id']}: {d['vendor']} {d['model']} "
+                  f"(serial {d['serial']})")
+    finally:
+        client.close()
+
+
+def cmd_info(args):
+    client = launch(args, handler=_log_handler)
+    try:
+        dev = pick_device(client, args)
+        client.request("open", {"device_id": dev["device_id"]})
+        desc = client.request("describe")
+        print(json.dumps(desc, indent=2))
+        print("\n# device config:")
+        print(json.dumps(client.request("config.get")["values"], indent=2))
+        for ch in [c["id"] for c in desc["channels"] if c["kind"] == "analog"]:
+            vals = client.request("config.get", {"channel": ch})["values"]
+            print(f"# {ch}: {json.dumps(vals)}")
+    finally:
+        client.close()
+
+
+def cmd_raw(args):
+    client = launch(args, handler=_log_handler)
+    try:
+        dev = pick_device(client, args)
+        client.request("open", {"device_id": dev["device_id"]})
+        for cmd in args.commands:
+            r = client.request("device.raw", {"command": cmd})
+            if "response" in r:
+                print(r["response"])
+    finally:
+        client.close()
+
+
+def _log_handler(method, params, payload):
+    if method == "log":
+        print(f"[plugin:{params.get('level')}] {params.get('message')}",
+              file=sys.stderr)
+
+
+class CaptureSink:
+    """Collects capture.* notifications from the reader thread."""
+
+    def __init__(self, verbose=True):
+        self.begin = None
+        self.chunks = {}       # stream -> list of (first_sample, bytes)
+        self.trigger_sample = None
+        self.end = None
+        self.done = threading.Event()
+        self.verbose = verbose
+        self._bytes = 0
+        self._t0 = None
+
+    def __call__(self, method, params, payload):
+        if method == "log":
+            _log_handler(method, params, payload)
+        elif method == "event.status" and self.verbose:
+            print(f"[{params.get('state')}]", file=sys.stderr)
+        elif method == "capture.begin":
+            self.begin = params
+            self._t0 = time.monotonic()
+        elif method == "capture.data":
+            self.chunks.setdefault(params["stream"], []).append(
+                (params["first_sample"], payload))
+            self._bytes += len(payload)
+        elif method == "capture.trigger":
+            self.trigger_sample = params.get("sample")
+        elif method == "capture.end":
+            self.end = params
+            if self.verbose and self._t0 is not None:
+                dt = time.monotonic() - self._t0
+                print(f"[transfer: {self._bytes / 1e6:.2f} MB in {dt:.2f}s "
+                      f"= {self._bytes / dt / 1e6:.2f} MB/s]", file=sys.stderr)
+            self.done.set()
+
+    def stream_array(self, stream_desc):
+        """Reassemble one stream into a numpy array of raw codes."""
+        enc = stream_desc["encoding"]
+        dtype = np.dtype(enc.get("dtype", "int8"))
+        parts = sorted(self.chunks.get(stream_desc["stream"], []))
+        raw = b"".join(p[1] for p in parts)
+        return np.frombuffer(raw, dtype=dtype)
+
+    def stream_volts(self, stream_desc):
+        enc = stream_desc["encoding"]
+        raw = self.stream_array(stream_desc)
+        return raw.astype(np.float64) * enc.get("scale", 1.0) \
+            + enc.get("offset", 0.0)
+
+
+def cmd_capture(args):
+    sink = CaptureSink(verbose=not args.quiet)
+    client = launch(args, handler=sink)
+    try:
+        dev = pick_device(client, args)
+        client.request("open", {"device_id": dev["device_id"]})
+        if not args.quiet:
+            print(f"opened {dev['vendor']} {dev['model']} "
+                  f"via {dev['connection']}", file=sys.stderr)
+
+        # Apply channel selection and any --set options.
+        desc = client.request("describe")
+        analog = [c["id"] for c in desc["channels"] if c["kind"] == "analog"]
+        if args.channels:
+            wanted = args.channels.split(",")
+            unknown = [c for c in wanted if c not in analog]
+            if unknown:
+                sys.exit(f"omso: unknown channels: {unknown} "
+                         f"(device has {analog})")
+            for ch in analog:
+                client.request("config.set",
+                               {"channel": ch,
+                                "values": {"enabled": ch in wanted}})
+        for spec in args.set or []:
+            scope, _, kv = spec.rpartition("@")
+            key, _, val = kv.partition("=")
+            try:
+                val = json.loads(val)
+            except ValueError:
+                pass  # keep as string
+            params = {"values": {key: val}}
+            if scope:
+                params["channel"] = scope
+            applied = client.request("config.set", params)["applied"]
+            if not args.quiet:
+                print(f"set {spec} -> {applied}", file=sys.stderr)
+
+        r = client.request("acquire.start",
+                           {"mode": args.mode, "timeout": args.timeout})
+        if not args.quiet:
+            print(f"capture {r['capture_id']} started ({args.mode})",
+                  file=sys.stderr)
+        if not sink.done.wait(args.timeout + 120):
+            sys.exit("omso: capture timed out")
+        if not sink.end.get("ok"):
+            sys.exit(f"omso: capture failed: {sink.end.get('error')}")
+
+        write_outputs(sink, args)
+    finally:
+        client.close()
+
+
+def write_outputs(sink, args):
+    begin = sink.begin
+    if begin is None:
+        sys.exit("omso: no capture.begin received")
+    samplerate = begin["samplerate"]
+    streams = begin["streams"]
+    analog_streams = [s for s in streams if s["kind"] == "analog"]
+    logic_streams = [s for s in streams if s["kind"] == "logic"]
+
+    volts = {s["channels"][0]: sink.stream_volts(s) for s in analog_streams}
+    nsamples = max((len(v) for v in volts.values()), default=0)
+    print(f"capture: {len(volts)} analog channel(s), {nsamples} samples "
+          f"@ {samplerate:.4g} Sa/s")
+    for name, v in volts.items():
+        print(f"  {name}: min {v.min():+.4f} V  max {v.max():+.4f} V  "
+              f"mean {v.mean():+.4f} V  pkpk {v.max() - v.min():.4f} V")
+
+    if args.output:
+        w = SrZipWriter(
+            args.output, samplerate,
+            logic_channels=[c for s in logic_streams for c in s["channels"]],
+            analog_channels=[s["channels"][0] for s in analog_streams])
+        for i, s in enumerate(analog_streams):
+            w.add_analog(i, volts[s["channels"][0]].astype(np.float32))
+        for s in logic_streams:
+            parts = sorted(sink.chunks.get(s["stream"], []))
+            for _, blob in parts:
+                w.add_logic(blob)
+        w.close()
+        print(f"wrote {args.output}")
+
+    if args.csv:
+        names = list(volts)
+        cols = [np.arange(nsamples) / samplerate +
+                begin.get("t0", 0.0)] + [volts[n] for n in names]
+        arr = np.column_stack(cols)
+        step = max(1, args.csv_decimate)
+        np.savetxt(args.csv, arr[::step], delimiter=",",
+                   header="time," + ",".join(names), comments="")
+        print(f"wrote {args.csv}" +
+              (f" (1:{step} decimated)" if step > 1 else ""))
+
+    if args.npz:
+        np.savez(args.npz, samplerate=samplerate,
+                 t0=begin.get("t0", 0.0),
+                 **{n: v for n, v in volts.items()})
+        print(f"wrote {args.npz}")
+
+
+def main():
+    p = argparse.ArgumentParser(prog="omso",
+                                description="OpenMSO CLI frontend")
+    p.add_argument("--plugin", default="sds1000xe",
+                   help="plugin name under plugins/ (default: sds1000xe)")
+    p.add_argument("--address", help="network address hint for scan")
+    p.add_argument("--device", help="substring to select among scan results")
+    sub = p.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("scan", help="list devices")
+    sub.add_parser("info", help="show device description and config")
+
+    pr = sub.add_parser("raw", help="send raw device commands (debug)")
+    pr.add_argument("commands", nargs="+")
+
+    pc = sub.add_parser("capture", help="perform a capture")
+    pc.add_argument("--channels", help="comma-separated, e.g. C1,C3 "
+                    "(default: leave device selection as-is)")
+    pc.add_argument("--mode", choices=["single", "snapshot"],
+                    default="single")
+    pc.add_argument("--timeout", type=float, default=30.0,
+                    help="trigger wait timeout, seconds")
+    pc.add_argument("--set", action="append", metavar="[CH@]KEY=VALUE",
+                    help="config to apply, e.g. C1@vdiv=0.5 or "
+                    "memory_depth=14M (repeatable)")
+    pc.add_argument("-o", "--output", help="write sigrok .sr file")
+    pc.add_argument("--csv", help="write CSV file")
+    pc.add_argument("--csv-decimate", type=int, default=1,
+                    help="write every Nth sample to CSV")
+    pc.add_argument("--npz", help="write numpy .npz file")
+    pc.add_argument("-q", "--quiet", action="store_true")
+
+    args = p.parse_args()
+    try:
+        {"scan": cmd_scan, "info": cmd_info,
+         "raw": cmd_raw, "capture": cmd_capture}[args.command](args)
+    except PluginError as e:
+        sys.exit(f"omso: plugin error: {e}")
+    except KeyboardInterrupt:
+        sys.exit(130)
+
+
+if __name__ == "__main__":
+    main()

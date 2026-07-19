@@ -1,0 +1,6 @@
+{
+    "name": "sds1000xe",
+    "description": "Siglent SDS1000X-E series oscilloscopes (SCPI over TCP or USBTMC)",
+    "run": ["{python}", "plugin.py"],
+    "license": "Apache-2.0"
+}

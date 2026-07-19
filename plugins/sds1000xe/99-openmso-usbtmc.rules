@@ -1,0 +1,4 @@
+# Grant plugdev group access to Siglent oscilloscopes on USBTMC.
+# Install: sudo cp 99-openmso-usbtmc.rules /etc/udev/rules.d/ && sudo udevadm control --reload
+SUBSYSTEM=="usbmisc", KERNEL=="usbtmc*", ATTRS{idVendor}=="f4ec", MODE="0660", GROUP="plugdev"
+SUBSYSTEM=="usb", ATTR{idVendor}=="f4ec", MODE="0660", GROUP="plugdev"

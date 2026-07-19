@@ -1,0 +1,6 @@
+{
+    "name": "demo",
+    "description": "Simulated mixed-signal device for testing frontends and the protocol",
+    "run": ["{python}", "plugin.py"],
+    "license": "Apache-2.0"
+}
