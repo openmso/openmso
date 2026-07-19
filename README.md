@@ -10,17 +10,23 @@ Note that this is currently a prototype / work in progress made with LLM assista
 
 ```
 docs/protocol.md      OCP wire protocol specification
-python/openmso/       reference implementation (framing, RPC, srzip writer,
-                      SCPI-over-TCP/USBTMC/VXI-11 transports)
-plugins/sds1000xe/    Siglent SDS1000X-E capture plugin
+python/openmso/       Python reference implementation (framing, RPC, srzip
+                      writer, SCPI-over-TCP/USBTMC/VXI-11 transports)
+rust/openmso-plugin/  Rust plugin-side library (framing, serve loop, SCPI
+                      transports incl. a dependency-free VXI-11 client)
+rust/sds1000xe/       Siglent SDS1000X-E capture plugin (native binary)
+plugins/sds1000xe/    plugin manifest, udev rule, hardware notes
 plugins/demo/         simulated mixed-signal device (no hardware needed)
 cli/omso              command-line frontend
-tests/                unit tests
+tests/                unit tests (Rust ones live next to the code: cargo test)
 ```
 
 ## Quick start
 
 ```sh
+# Build the native plugins once (needs a Rust toolchain):
+cargo build --release --manifest-path rust/Cargo.toml
+
 # Simulated device, no hardware:
 ./cli/omso --plugin demo capture -o demo.sr --csv demo.csv
 pulseview demo.sr

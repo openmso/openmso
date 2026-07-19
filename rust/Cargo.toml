@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["openmso-plugin", "sds1000xe"]
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+# preserve_order keeps config.set value maps in the order the client sent
+# them (application order matters, e.g. probe_factor before vdiv).
+serde_json = { version = "1", features = ["preserve_order"] }
+libc = "0.2"

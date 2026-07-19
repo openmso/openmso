@@ -1,6 +1,7 @@
 {
     "name": "sds1000xe",
-    "description": "Siglent SDS1000X-E series oscilloscopes (SCPI over TCP or USBTMC)",
-    "run": ["{python}", "plugin.py"],
+    "description": "Siglent SDS1000X-E series oscilloscopes (SCPI over VXI-11, TCP or USBTMC)",
+    "run": ["../../rust/target/release/sds1000xe"],
+    "build": "cargo build --release   (run in rust/)",
     "license": "Apache-2.0"
 }

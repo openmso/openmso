@@ -1,0 +1,10 @@
+[package]
+name = "sds1000xe"
+version = "0.2.0"
+description = "OpenMSO capture plugin for Siglent SDS1000X-E series oscilloscopes"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+openmso-plugin = { path = "../openmso-plugin" }
+serde_json.workspace = true

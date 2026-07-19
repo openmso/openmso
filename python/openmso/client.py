@@ -145,9 +145,15 @@ def find_plugin(name, repo_root=None):
     with open(manifest_path) as f:
         manifest = json.load(f)
     argv = [a.replace("{python}", sys.executable) for a in manifest["run"]]
-    # Relative entries resolve against the plugin directory.
+    # Relative path entries (anything with a separator, or a *.py script)
+    # resolve against the plugin directory; plain flags pass through.
     plugin_dir = os.path.dirname(manifest_path)
-    argv = [a if os.path.isabs(a) or a == sys.executable
-            else os.path.join(plugin_dir, a) if a.endswith(".py") else a
+    argv = [a if os.path.isabs(a) or (os.sep not in a and not a.endswith(".py"))
+            else os.path.normpath(os.path.join(plugin_dir, a))
             for a in argv]
+    if os.sep in argv[0] and not os.path.exists(argv[0]):
+        hint = manifest.get("build")
+        raise FileNotFoundError(
+            f"plugin {name!r} executable missing: {argv[0]}"
+            + (f" — build it with: {hint}" if hint else ""))
     return argv, manifest
