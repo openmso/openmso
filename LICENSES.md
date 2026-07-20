@@ -10,7 +10,7 @@ OpenMSO uses a hybrid licensing model. The core libraries are permissively licen
 | Official capture plugins (`plugins/*`, `rust/sds1000xe`) | Apache-2.0 |
 | A capture plugin which wraps libsigrok (`plugins/libsigrok`, not currentlyi implemented) | GPL-3.0-or-later | 
 | CLI frontend (`cli/`) | Apache-2.0 | |
-| GUI (`gui/`, not currently implemented) | GPL-3.0-or-later | Likely to use parts of PulseView and libsigrokdecode (GPLv3+). |
+| GUI (`gui/`) | GPL-3.0-or-later | Likely to use parts of PulseView and libsigrokdecode (GPLv3+). |
 
 Rules for contributors:
 
