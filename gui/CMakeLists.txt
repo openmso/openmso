@@ -13,6 +13,14 @@ find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Widgets Network Test)
 
 qt_standard_project_setup()
 
+# Plugins directory: defaults to <repo>/plugins (developer mode).
+# Overridable via -DOPENMSO_PLUGINS_DIR=... at configure time.
+if(NOT DEFINED OPENMSO_PLUGINS_DIR)
+    set(OPENMSO_PLUGINS_DIR "${CMAKE_SOURCE_DIR}/../plugins")
+endif()
+get_filename_component(OPENMSO_PLUGINS_DIR
+    "${OPENMSO_PLUGINS_DIR}" ABSOLUTE)
+
 enable_testing()
 
 add_subdirectory(src)
