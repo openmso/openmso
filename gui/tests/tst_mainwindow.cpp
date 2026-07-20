@@ -5,7 +5,6 @@
 #include <QTest>
 
 #include "ui/MainWindow.h"
-
 using openmso::ui::MainWindow;
 
 class TestMainWindow : public QObject {
