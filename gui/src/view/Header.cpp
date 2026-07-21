@@ -30,7 +30,7 @@ void Header::paintEvent(QPaintEvent *)
     const QRect r = rect();
     p.fillRect(r, palette().window());
 
-    int y = 0;
+    int y = -st_.yOffset;
     for (const auto &t : traces_) {
         if (!t) continue;
         QRect row(r.left(), y, r.width(), t->height());

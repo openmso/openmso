@@ -17,6 +17,10 @@ struct ViewState {
     // Vertical: pixels per trace row (uniform for v0.1).
     int rowHeight = 80;
 
+    // Vertical scroll position: pixels of trace content scrolled above
+    // the top of the viewport. 0 = first trace flush with the top.
+    int yOffset = 0;
+
     // Cursors (in seconds). -1 = inactive.
     double cursorA = -1.0;
     double cursorB = -1.0;

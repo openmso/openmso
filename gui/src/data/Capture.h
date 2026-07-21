@@ -47,7 +47,13 @@ public:
         QString id;
         QString name;
         SignalKind kind;
+        int index = -1;   // ordinal within kind (color + logic bit)
     };
+    // Populate the channel/signal list without starting an acquisition.
+    // Used when a device is opened so the view can show its channels
+    // while the state stays Idle. Does not change samplerate/t0.
+    void declareChannels(const QList<ChannelSpec> &channels);
+
     void beginCapture(double samplerate, double t0,
                       const QList<ChannelSpec> &channels);
 
@@ -70,6 +76,7 @@ public:
 
 signals:
     void stateChanged(State s);
+    void channelsChanged();     // signal list rebuilt (declare or begin)
     void captureBeginning();    // before signals are created
     void captureBegan();
     void triggerChanged(qint64 sample);
@@ -80,6 +87,7 @@ signals:
 private:
     void setState(State s);
     void setErrorString(const QString &s);
+    void rebuildSignals(const QList<ChannelSpec> &channels);
 
     State state_ = State::Idle;
     double samplerate_ = 0.0;

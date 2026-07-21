@@ -2,7 +2,6 @@
 
 #include "view/TraceView.h"
 #include "data/Capture.h"
-#include "data/Signal.h"
 #include "ocp/PluginManifest.h"
 
 #include <QAction>
@@ -11,6 +10,7 @@
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QFileInfo>
+#include <QIcon>
 #include <QLabel>
 #include <QMenu>
 #include <QMenuBar>
@@ -43,6 +43,7 @@ MainWindow::MainWindow(QWidget *parent)
     traceView_ = new view::TraceView(this);
     setCentralWidget(traceView_);
 
+    buildActions();
     buildMenus();
     buildToolBar();
     buildStatusBar();
@@ -59,39 +60,51 @@ void MainWindow::closeEvent(QCloseEvent *event)
     event->accept();
 }
 
+void MainWindow::buildActions()
+{
+    // One QAction per command, shared between the menu and the toolbar
+    // so their enabled-state and triggers never diverge.
+    connectAction_ = new QAction(tr("Connect"), this);
+    connect(connectAction_, &QAction::triggered, this, &MainWindow::onConnect);
+
+    startAction_ = new QAction(tr("Start"), this);
+    startAction_->setShortcut(QKeySequence(Qt::Key_Space));
+    startAction_->setIcon(QIcon::fromTheme(QStringLiteral("media-playback-start")));
+    connect(startAction_, &QAction::triggered, this, &MainWindow::onStart);
+
+    stopAction_ = new QAction(tr("Stop"), this);
+    stopAction_->setIcon(QIcon::fromTheme(QStringLiteral("media-playback-stop")));
+    connect(stopAction_, &QAction::triggered, this, &MainWindow::onStop);
+
+    saveAction_ = new QAction(tr("Save…"), this);
+    saveAction_->setShortcut(QKeySequence::Save);
+    saveAction_->setEnabled(false);   // wired up in a later milestone
+}
+
 void MainWindow::buildMenus()
 {
     auto *bar = menuBar();
 
     auto *fileMenu = bar->addMenu(tr("&File"));
-    fileMenu->addAction(tr("Save As…"));
+    fileMenu->addAction(saveAction_);
     fileMenu->addSeparator();
     fileMenu->addAction(tr("Quit"), QKeySequence::Quit, this, &QWidget::close);
 
     auto *captureMenu = bar->addMenu(tr("&Capture"));
-    captureMenu->addAction(tr("Start"), QKeySequence(Qt::Key_Space),
-                           this, &MainWindow::onStart);
-    captureMenu->addAction(tr("Stop"), this, &MainWindow::onStop);
+    captureMenu->addAction(startAction_);
+    captureMenu->addAction(stopAction_);
     captureMenu->addSeparator();
     captureMenu->addAction(tr("Configure device…"));
 
     auto *viewMenu = bar->addMenu(tr("&View"));
-    viewMenu->addAction(tr("Zoom in"), QKeySequence(Qt::Key_Plus), this, [this]{
-        traceView_->state().scale *= 0.5;
-        traceView_->update();
-    });
-    viewMenu->addAction(tr("Zoom out"), QKeySequence(Qt::Key_Minus), this, [this]{
-        traceView_->state().scale *= 2.0;
-        traceView_->update();
-    });
-    viewMenu->addAction(tr("Go to trigger"), QKeySequence(Qt::Key_Home), this, [this]{
-        // Trigger jump is handled in Viewport's key handler; this is a stub.
-    });
-    viewMenu->addAction(tr("Toggle cursors"), QKeySequence(Qt::Key_C), this, [this]{
-        auto &st = traceView_->state();
-        st.cursorsVisible = !st.cursorsVisible;
-        traceView_->update();
-    });
+    viewMenu->addAction(tr("Zoom in"), QKeySequence(Qt::Key_Plus),
+                        traceView_, &view::TraceView::zoomIn);
+    viewMenu->addAction(tr("Zoom out"), QKeySequence(Qt::Key_Minus),
+                        traceView_, &view::TraceView::zoomOut);
+    viewMenu->addAction(tr("Fit to window"), QKeySequence(Qt::Key_0),
+                        traceView_, &view::TraceView::fitToData);
+    viewMenu->addAction(tr("Toggle cursors"), QKeySequence(Qt::Key_C),
+                        traceView_, &view::TraceView::toggleCursors);
 
     auto *helpMenu = bar->addMenu(tr("&Help"));
     helpMenu->addAction(tr("About OpenMSO"), this, [this]{
@@ -106,6 +119,7 @@ void MainWindow::buildToolBar()
     toolbar_ = addToolBar(tr("Main"));
     toolbar_->setObjectName("mainToolbar");
     toolbar_->setMovable(false);
+    toolbar_->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
 
     // Plugin picker.
     pluginPicker_ = new QComboBox(toolbar_);
@@ -120,12 +134,12 @@ void MainWindow::buildToolBar()
         pluginPicker_->addItem(tr("(no plugins found)"), QString());
     toolbar_->addWidget(pluginPicker_);
 
-    connectAction_ = toolbar_->addAction(tr("Connect"), this, &MainWindow::onConnect);
+    toolbar_->addAction(connectAction_);
     toolbar_->addSeparator();
-    startAction_ = toolbar_->addAction(tr("Start"), this, &MainWindow::onStart);
-    stopAction_ = toolbar_->addAction(tr("Stop"), this, &MainWindow::onStop);
+    toolbar_->addAction(startAction_);
+    toolbar_->addAction(stopAction_);
     toolbar_->addSeparator();
-    toolbar_->addAction(tr("Save…"));
+    toolbar_->addAction(saveAction_);
 }
 
 void MainWindow::buildStatusBar()

@@ -58,8 +58,8 @@ void Viewport::paintEvent(QPaintEvent *)
     // Background.
     p.fillRect(r, palette().base());
 
-    // Stack traces top to bottom.
-    int y = 0;
+    // Stack traces top to bottom, shifted by the vertical scroll offset.
+    int y = -state_.yOffset;
     for (const auto &t : traces_) {
         if (!t) continue;
         QRect row(r.left(), y, r.width(), t->height());
@@ -96,8 +96,39 @@ void Viewport::paintEvent(QPaintEvent *)
 
 void Viewport::wheelEvent(QWheelEvent *e)
 {
-    const double factor = (e->angleDelta().y() > 0) ? 0.5 : 2.0;
-    zoomAt(double(e->position().x()), factor);
+    if (e->modifiers() & Qt::ControlModifier) {
+        // Ctrl+wheel: zoom the time axis around the cursor.
+        const double factor = (e->angleDelta().y() > 0) ? 0.5 : 2.0;
+        zoomAt(double(e->position().x()), factor);
+    } else {
+        // Plain wheel: scroll vertically through the trace stack.
+        const int maxY = std::max(0, contentHeight() - height());
+        int y = state_.yOffset - e->angleDelta().y() / 2;
+        y = std::max(0, std::min(maxY, y));
+        if (y != state_.yOffset) {
+            state_.yOffset = y;
+            emit stateChanged();
+            update();
+        }
+    }
+    e->accept();
+}
+
+void Viewport::zoom(double factor)
+{
+    zoomAt(width() / 2.0, factor);
+}
+
+void Viewport::toggleCursors()
+{
+    state_.cursorsVisible = !state_.cursorsVisible;
+    if (state_.cursorsVisible && state_.cursorA < 0) {
+        state_.cursorA = state_.xToTime(width() * 0.3);
+        state_.cursorB = state_.xToTime(width() * 0.7);
+        emit cursorMoved(state_.cursorA, state_.cursorB);
+    }
+    emit stateChanged();
+    update();
 }
 
 void Viewport::zoomAt(double x, double factor)
@@ -196,14 +227,7 @@ void Viewport::keyPressEvent(QKeyEvent *e)
         }
         break;
     case Qt::Key_C:
-        state_.cursorsVisible = !state_.cursorsVisible;
-        if (state_.cursorsVisible && state_.cursorA < 0) {
-            state_.cursorA = state_.xToTime(width() * 0.3);
-            state_.cursorB = state_.xToTime(width() * 0.7);
-            emit cursorMoved(state_.cursorA, state_.cursorB);
-        }
-        emit stateChanged();
-        update();
+        toggleCursors();
         break;
     default:
         QWidget::keyPressEvent(e);

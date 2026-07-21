@@ -1,5 +1,8 @@
 #include "Ruler.h"
 
+#include "util/TimeFormat.h"
+
+#include <QFontMetrics>
 #include <QPainter>
 #include <QPaintEvent>
 #include <QPalette>
@@ -13,35 +16,6 @@ Ruler::Ruler(QWidget *parent) : QWidget(parent)
     setBackgroundRole(QPalette::Window);
 }
 
-namespace {
-
-// Pick a "nice" tick spacing: 1/2/5 × 10^n seconds, such that the
-// spacing in pixels is between 60 and 120.
-double niceTickSpacing(double scale)
-{
-    // seconds per 80px target
-    double target = scale * 80.0;
-    double mag = std::pow(10.0, std::floor(std::log10(target)));
-    double norm = target / mag;
-    double step;
-    if (norm < 1.5)      step = 1.0;
-    else if (norm < 3.5) step = 2.0;
-    else if (norm < 7.5) step = 5.0;
-    else                 step = 10.0;
-    return step * mag;
-}
-
-QString formatTime(double t)
-{
-    double a = std::abs(t);
-    if (a >= 1.0)      return QStringLiteral("%1 s").arg(t, 0, 'f', 3);
-    if (a >= 1e-3)     return QStringLiteral("%1 ms").arg(t * 1e3, 0, 'f', 3);
-    if (a >= 1e-6)     return QStringLiteral("%1 µs").arg(t * 1e6, 0, 'f', 3);
-    return QStringLiteral("%1 ns").arg(t * 1e9, 0, 'f', 1);
-}
-
-} // namespace
-
 void Ruler::paintEvent(QPaintEvent *)
 {
     QPainter p(this);
@@ -50,15 +24,31 @@ void Ruler::paintEvent(QPaintEvent *)
 
     p.setPen(palette().text().color());
 
-    const double spacing = niceTickSpacing(st_.scale);
+    const QFontMetrics fm = p.fontMetrics();
+    // Choose a tick spacing whose labels won't collide: target at least
+    // the width of a representative label plus padding.
+    const double minLabelPx = fm.horizontalAdvance(QStringLiteral("000.000 ms")) + 16;
+    const double spacing = util::niceTickStep(st_.scale * minLabelPx);
+    const int decimals = util::decimalsForStep(spacing, st_.offset + r.width() * st_.scale);
+
     const double tLeft = st_.offset;
     const double tRight = st_.offset + r.width() * st_.scale;
     double t = std::floor(tLeft / spacing) * spacing;
 
+    int lastLabelRight = -10000;
     while (t <= tRight) {
-        int x = int(st_.timeToX(t));
+        const int x = int(st_.timeToX(t));
         p.drawLine(x, r.bottom() - 6, x, r.bottom());
-        p.drawText(x + 3, r.top() + 14, formatTime(t));
+        // Minor tick at the half step.
+        const int xh = int(st_.timeToX(t + spacing / 2.0));
+        p.drawLine(xh, r.bottom() - 3, xh, r.bottom());
+        // Only draw the label if it clears the previous one.
+        const QString label = util::formatTime(t, decimals);
+        const int lw = fm.horizontalAdvance(label);
+        if (x + 3 > lastLabelRight + 6) {
+            p.drawText(x + 3, r.top() + 14, label);
+            lastLabelRight = x + 3 + lw;
+        }
         t += spacing;
     }
 
@@ -78,8 +68,8 @@ void Ruler::paintEvent(QPaintEvent *)
         if (st_.cursorA >= 0 && st_.cursorB >= 0) {
             double dt = std::abs(st_.cursorB - st_.cursorA);
             QString label = QStringLiteral("Δt=%1  f=%2")
-                                .arg(formatTime(dt))
-                                .arg(dt > 0 ? formatTime(1.0 / dt)
+                                .arg(util::formatDelta(dt))
+                                .arg(dt > 0 ? util::formatTime(1.0 / dt)
                                             : QStringLiteral("∞"));
             p.setPen(palette().text().color());
             p.drawText(r.center().x() - 60, r.top() + 12, label);

@@ -24,6 +24,11 @@ public:
     ViewState &state() { return state_; }
     const ViewState &state() const { return state_; }
 
+    // Zoom the time axis around the viewport center (factor < 1 zooms
+    // in). Toggle the cursor pair on/off. Both emit stateChanged().
+    void zoom(double factor);
+    void toggleCursors();
+
     // Total vertical pixels needed for all traces.
     int contentHeight() const;
 

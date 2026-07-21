@@ -75,15 +75,17 @@ bool Session::connectDemo(const QString &pluginsDir)
         const auto desc = c->request(QStringLiteral("describe"));
     QList<data::Capture::ChannelSpec> specs;
         const auto channels = desc.value("channels").toArray();
+        int analogOrd = 0, logicOrd = 0;
         for (const auto &v : channels) {
             const auto ch = v.toObject();
-            const QString kind = ch.value("kind").toString();
+            const bool analog = ch.value("kind").toString() == "analog";
             specs.append({ch.value("id").toString(),
                           ch.value("name").toString(),
-                          kind == "analog" ? data::SignalKind::Analog
-                                           : data::SignalKind::Logic});
+                          analog ? data::SignalKind::Analog
+                                 : data::SignalKind::Logic,
+                          analog ? analogOrd++ : logicOrd++});
         }
-        capture_->beginCapture(0, 0, specs);  // placeholder sr/t0 until begin
+        capture_->declareChannels(specs);  // show channels; stay Idle
         emit deviceReady(QStringLiteral("demo://0 Demo MSO"));
         return true;
     } catch (const openmso::ocp::PluginError &e) {
@@ -147,6 +149,7 @@ void Session::onCaptureBegin(const QJsonObject &params)
     // Rebuild the channel list in stream order so segments attach to
     // the right Signal.
     QList<data::Capture::ChannelSpec> specs;
+    int analogOrd = 0;
     const auto streams = params.value("streams").toArray();
     for (const auto &v : streams) {
         const auto s = v.toObject();
@@ -168,11 +171,14 @@ void Session::onCaptureBegin(const QJsonObject &params)
         }
         streams_.insert(info.stream, info);
 
+        // Logic bit position within the stream's packed unit; analog
+        // channels take a running scope-color ordinal.
+        int bit = 0;
         for (const auto &id : info.channelIds) {
-            const auto kind = (info.kind == "analog")
-                                  ? data::SignalKind::Analog
-                                  : data::SignalKind::Logic;
-            specs.append({id, id, kind});
+            if (info.kind == "analog")
+                specs.append({id, id, data::SignalKind::Analog, analogOrd++});
+            else
+                specs.append({id, id, data::SignalKind::Logic, bit++});
         }
     }
 

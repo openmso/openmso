@@ -37,6 +37,7 @@ private slots:
     void onCaptureStateChanged(openmso::data::Capture::State s);
 
 private:
+    void buildActions();
     void buildMenus();
     void buildToolBar();
     void buildStatusBar();
@@ -48,6 +49,7 @@ private:
     QAction *connectAction_ = nullptr;
     QAction *startAction_ = nullptr;
     QAction *stopAction_ = nullptr;
+    QAction *saveAction_ = nullptr;
     QLabel *statusState_ = nullptr;
     QLabel *statusDevice_ = nullptr;
     QLabel *statusCursor_ = nullptr;

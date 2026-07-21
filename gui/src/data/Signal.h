@@ -23,6 +23,13 @@ public:
     const QString &name() const { return name_; }
     SignalKind kind() const { return kind_; }
 
+    // Ordinal of this channel within its kind, as reported by the
+    // device. Drives the default trace color (resistor code for logic,
+    // scope order for analog) and, for logic, the bit position within
+    // the packed segment unit. -1 until assigned.
+    int channelIndex() const { return channelIndex_; }
+    void setChannelIndex(int i) { channelIndex_ = i; }
+
     bool enabled() const { return enabled_; }
     void setEnabled(bool e);
 
@@ -47,6 +54,7 @@ private:
     QString id_;
     QString name_;
     SignalKind kind_;
+    int channelIndex_ = -1;
     bool enabled_ = true;
     QColor color_;
     QList<Segment *> segments_;  // owned

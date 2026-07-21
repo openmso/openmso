@@ -7,6 +7,7 @@
 #include "view/ViewState.h"
 
 class QSplitter;
+class QScrollBar;
 
 namespace openmso::data { class Capture; }
 
@@ -30,18 +31,31 @@ public:
 
     ViewState &state() { return state_; }
 
+    // Set the time scale so the whole capture fits the viewport width,
+    // with the start of the data at the left edge.
+    void fitToData();
+
+    // View commands (delegate to the Viewport, which owns the state).
+    void zoomIn();
+    void zoomOut();
+    void toggleCursors();
+
 signals:
     void cursorMoved(double a, double b);
+
+protected:
+    void resizeEvent(QResizeEvent *e) override;
 
 private:
     void rebuildTraces();
     void onStateChanged();
     void onDataChanged();
+    void syncScrollBar();
 
-    QSplitter *splitter_;
     Header *header_;
     Ruler *ruler_;
     Viewport *viewport_;
+    QScrollBar *vscroll_;
     QPointer<data::Capture> capture_;
     QList<QPointer<Trace>> traces_;
     ViewState state_;

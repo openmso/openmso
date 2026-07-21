@@ -1,3 +1,26 @@
+# Utility library. Pure, testable helpers (color palette, time
+# formatting) with no view/data dependencies. Per 04-architecture.md.
+
+add_library(openmso-util STATIC
+    util/ChannelColors.cpp
+    util/ChannelColors.h
+    util/TimeFormat.cpp
+    util/TimeFormat.h
+)
+
+target_include_directories(openmso-util PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+target_link_libraries(openmso-util PUBLIC
+    Qt6::Core
+    Qt6::Gui
+)
+
+set_target_properties(openmso-util PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+)
+
 # Data model library. Pure Qt6 Core — no Python, no libsigrok, no view
 # layer. Per docs/gui-plan/04-architecture.md layering rule 3.
 
@@ -61,6 +84,7 @@ target_include_directories(openmso-view PUBLIC
 
 target_link_libraries(openmso-view PUBLIC
     openmso-data
+    openmso-util
     Qt6::Core
     Qt6::Gui
     Qt6::Widgets
@@ -118,6 +142,7 @@ target_link_libraries(openmso-gui PRIVATE
     openmso-data
     openmso-view
     openmso-ocp
+    openmso-util
     Qt6::Core
     Qt6::Gui
     Qt6::Widgets

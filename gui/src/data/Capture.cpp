@@ -15,14 +15,8 @@ Signal *Capture::signalById(const QString &id) const
     return nullptr;
 }
 
-void Capture::beginCapture(double samplerate, double t0,
-                           const QList<ChannelSpec> &channels)
+void Capture::rebuildSignals(const QList<ChannelSpec> &channels)
 {
-    setState(State::Arming);
-    emit captureBeginning();
-
-    samplerate_ = samplerate;
-    t0_ = t0;
     triggerSample_ = -1;
     sampleCount_ = 0;
     errorString_.clear();
@@ -31,9 +25,30 @@ void Capture::beginCapture(double samplerate, double t0,
     signals_.clear();
     for (const auto &c : channels) {
         auto *s = new Signal(c.id, c.name, c.kind, this);
+        s->setChannelIndex(c.index);
         signals_.append(s);
     }
+}
+
+void Capture::declareChannels(const QList<ChannelSpec> &channels)
+{
+    rebuildSignals(channels);
+    setState(State::Idle);
+    emit channelsChanged();
+}
+
+void Capture::beginCapture(double samplerate, double t0,
+                           const QList<ChannelSpec> &channels)
+{
+    setState(State::Arming);
+    emit captureBeginning();
+
+    samplerate_ = samplerate;
+    t0_ = t0;
+    rebuildSignals(channels);
+
     setState(State::Capturing);
+    emit channelsChanged();
     emit captureBegan();
 }
 
