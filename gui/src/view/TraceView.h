@@ -29,7 +29,7 @@ public:
     // capture for dataChanged and repaints.
     void setCapture(data::Capture *cap);
 
-    ViewState &state() { return state_; }
+    ViewState *state() { return state_; }
 
     // Set the time scale so the whole capture fits the viewport width,
     // with the start of the data at the left edge.
@@ -48,17 +48,20 @@ protected:
 
 private:
     void rebuildTraces();
-    void onStateChanged();
     void onDataChanged();
-    void syncScrollBar();
+    void syncScrollBars();
+    // Push the capture's current time extent into the ViewState so the
+    // horizontal zoom/scroll stays clamped to the data.
+    void updateDataSpan();
 
+    ViewState *state_;   // single source of truth, owned here.
     Header *header_;
     Ruler *ruler_;
     Viewport *viewport_;
     QScrollBar *vscroll_;
+    QScrollBar *hscroll_;
     QPointer<data::Capture> capture_;
     QList<QPointer<Trace>> traces_;
-    ViewState state_;
 };
 
 } // namespace openmso::view

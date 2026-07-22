@@ -18,7 +18,10 @@ public:
     explicit Header(QWidget *parent = nullptr);
 
     void setTraces(const QList<Trace *> &traces);
-    void setState(const ViewState &st) { st_ = st; update(); }
+
+    // Inject the shared view state (owned by TraceView); repaints on
+    // changed() so the labels track the vertical scroll offset.
+    void setViewState(ViewState *st);
 
 protected:
     void paintEvent(QPaintEvent *e) override;
@@ -26,7 +29,7 @@ protected:
 
 private:
     QList<QPointer<Trace>> traces_;
-    ViewState st_;
+    ViewState *st_ = nullptr;   // shared, owned by TraceView.
 };
 
 } // namespace openmso::view

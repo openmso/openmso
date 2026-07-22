@@ -42,6 +42,10 @@ private:
     void buildToolBar();
     void buildStatusBar();
     void updateToolbarState();
+    // Tear down the current session safely. Nulls session_ first and
+    // defers the delete (deleteLater) so a session that is torn down from
+    // within one of its own signals isn't freed mid-emit.
+    void destroySession();
 
     // Chrome.
     QToolBar *toolbar_ = nullptr;

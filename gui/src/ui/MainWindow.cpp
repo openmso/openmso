@@ -165,14 +165,24 @@ void MainWindow::updateToolbarState()
     connectAction_->setText(connected ? tr("Disconnect") : tr("Connect"));
 }
 
+void MainWindow::destroySession()
+{
+    if (!session_) return;
+    // Detach and null before deleting so nothing (including a signal
+    // emitted from inside the Session) touches a half-destroyed object.
+    Session *doomed = session_;
+    session_ = nullptr;
+    disconnect(doomed, nullptr, this, nullptr);
+    traceView_->setCapture(nullptr);
+    doomed->deleteLater();
+}
+
 void MainWindow::onConnect()
 {
     if (session_ && session_->client()) {
         // Disconnect.
         session_->disconnectFromPlugin();
-        delete session_;
-        session_ = nullptr;
-        traceView_->setCapture(nullptr);
+        destroySession();
         statusDevice_->setText(tr("no device"));
         updateToolbarState();
         return;
@@ -243,11 +253,7 @@ void MainWindow::onDeviceError(const QString &msg)
 {
     statusState_->setText(tr("● error"));
     QMessageBox::warning(this, tr("OpenMSO"), msg);
-    if (session_) {
-        delete session_;
-        session_ = nullptr;
-        traceView_->setCapture(nullptr);
-    }
+    destroySession();
     updateToolbarState();
 }
 

@@ -31,7 +31,7 @@ void LogicSignalTrace::paintMid(QPainter &p, const QRect &rect,
     const qint64 last  = std::min(total - 1, st.xToSample(rect.right(), sr));
     if (last < first) return;
 
-    const double samplesPerPixel = sr * st.scale;
+    const double samplesPerPixel = sr * st.scale();
 
     p.setPen(QPen(color_, 1));
 

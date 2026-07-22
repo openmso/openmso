@@ -29,11 +29,12 @@ void AnalogSignalTrace::paintMid(QPainter &p, const QRect &rect,
     const qint64 last  = std::min(total - 1, st.xToSample(rect.right(), sr));
     if (last < first) return;
 
-    const double samplesPerPixel = sr * st.scale;
+    const double samplesPerPixel = sr * st.scale();
 
-    // Determine value range across the visible window (for v-fit).
+    // Determine value range across the WHOLE capture (not just the
+    // visible window) so the amplitude is stable while panning/zooming X.
     double vmin, vmax;
-    valueRange(*seg, first, last, vmin, vmax);
+    fullRange(*seg, vmin, vmax);
     if (vmax - vmin < 1e-9) { vmax = vmin + 1e-9; }
     const double padding = (vmax - vmin) * 0.1;
     vmin -= padding; vmax += padding;
@@ -83,6 +84,20 @@ void AnalogSignalTrace::paintMid(QPainter &p, const QRect &rect,
             }
         }
     }
+}
+
+void AnalogSignalTrace::fullRange(const data::AnalogSegment &seg,
+                                  double &vmin, double &vmax) const
+{
+    const qint64 total = seg.appendedSamples();
+    if (total <= 0) { vmin = 0.0; vmax = 1.0; return; }
+    // Cache: only recompute when more samples have arrived.
+    if (total != cachedForSamples_) {
+        valueRange(seg, 0, total - 1, cachedVmin_, cachedVmax_);
+        cachedForSamples_ = total;
+    }
+    vmin = cachedVmin_;
+    vmax = cachedVmax_;
 }
 
 void AnalogSignalTrace::valueRange(const data::AnalogSegment &seg,

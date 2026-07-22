@@ -18,25 +18,21 @@ class Viewport : public QWidget {
 public:
     explicit Viewport(QWidget *parent = nullptr);
 
+    // Inject the shared view state (owned by TraceView). The viewport
+    // reads it every paint and mutates it through its setters; it also
+    // repaints itself whenever the state signals changed().
+    void setViewState(ViewState *st);
+
     void setTraces(const QList<Trace *> &traces);
     void clearTraces();
 
-    ViewState &state() { return state_; }
-    const ViewState &state() const { return state_; }
-
     // Zoom the time axis around the viewport center (factor < 1 zooms
-    // in). Toggle the cursor pair on/off. Both emit stateChanged().
+    // in). Toggle the cursor pair on/off.
     void zoom(double factor);
     void toggleCursors();
 
     // Total vertical pixels needed for all traces.
     int contentHeight() const;
-
-signals:
-    // Emitted whenever scale/offset/cursors change (so the Ruler and
-    // Header can repaint).
-    void stateChanged();
-    void cursorMoved(double a, double b);
 
 protected:
     void paintEvent(QPaintEvent *e) override;
@@ -48,16 +44,16 @@ protected:
 
 private:
     void zoomAt(double x, double factor);
+    // Horizontal pan by a pixel delta (positive = content moves left).
+    void panPixels(double dxPixels);
 
     QList<QPointer<Trace>> traces_;
-    ViewState state_;
+    ViewState *state_ = nullptr;   // shared, owned by TraceView.
 
-    // Drag state.
-    bool dragging_ = false;
-    QPoint dragStart_;
-    double dragOffsetStart_ = 0;
-    bool cursorDragging_ = false;
-    int cursorDragWhich_ = 0; // 0=A, 1=B
+    // Cursor selection: left-drag lays down a time range (like selecting
+    // audio in Audacity), anchored where the press landed.
+    bool selecting_ = false;
+    double selAnchor_ = 0.0;   // seconds.
 };
 
 } // namespace openmso::view

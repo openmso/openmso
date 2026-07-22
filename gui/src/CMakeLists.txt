@@ -75,6 +75,7 @@ add_library(openmso-view STATIC
     view/TraceView.h
     view/Viewport.cpp
     view/Viewport.h
+    view/ViewState.cpp
     view/ViewState.h
 )
 

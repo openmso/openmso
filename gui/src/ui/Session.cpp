@@ -122,6 +122,11 @@ void Session::disconnectFromPlugin()
 {
     streams_.clear();
     if (client_) {
+        // Detach our slots first. shutdown() closes the io device, which
+        // emits disconnected() synchronously; if that still reached our
+        // lambda it would emit deviceError() → MainWindow deletes this
+        // Session while shutdown() is on the stack (use-after-free).
+        disconnect(client_, nullptr, this, nullptr);
         client_->shutdown();
         client_ = nullptr;
     }

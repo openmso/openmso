@@ -11,6 +11,7 @@
 #include "view/LogicSignalTrace.h"
 #include "view/Ruler.h"
 #include "view/TraceView.h"
+#include "view/ViewState.h"
 #include "view/Viewport.h"
 
 using namespace openmso::data;
@@ -24,6 +25,7 @@ class TestView : public QObject {
 private slots:
     void paintWithCapture();
     void paintEmptyCapture();
+    void clampNeverShowsBlankSpace();
 };
 
 namespace {
@@ -128,6 +130,33 @@ void TestView::paintEmptyCapture()
     img.fill(Qt::black);
     tv.render(&img);  // should not crash
     QVERIFY(!img.isNull());
+}
+
+// The core "never lose the signal off the edge" behaviour: you can't
+// zoom out past a whole-capture fit, and you can't scroll the data out
+// of the viewport.
+void TestView::clampNeverShowsBlankSpace()
+{
+    ViewState st;
+    st.setViewportWidth(1000);
+    st.setDataSpan(0.0, 1.0);          // 1 s capture, fit = 1e-3 s/px.
+
+    // Zoom out past fit is refused (pinned to fit, offset to the start).
+    st.setScale(1.0);
+    QCOMPARE(st.scale(), st.fitScale());
+    QCOMPARE(st.offset(), 0.0);
+    QVERIFY(qFuzzyCompare(st.fitScale(), 1e-3));
+
+    // Zoom in 10×: now a scroll range opens up.
+    st.setScale(1e-4);
+    QCOMPARE(st.scale(), 1e-4);        // < fit, kept as-is.
+
+    // Scroll past the right edge clamps to end-of-data (visible = 0.1 s).
+    st.setOffset(5.0);
+    QVERIFY(qFuzzyCompare(st.offset(), 0.9));
+    // Scroll before the start clamps to the start.
+    st.setOffset(-1.0);
+    QCOMPARE(st.offset(), 0.0);
 }
 
 QTEST_MAIN(TestView)
