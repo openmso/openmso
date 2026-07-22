@@ -25,8 +25,12 @@ void AnalogSignalTrace::paintMid(QPainter &p, const QRect &rect,
     const qint64 total = seg->appendedSamples();
     if (total == 0) return;
 
-    const qint64 first = std::max(qint64(0), st.xToSample(rect.left(), sr));
-    const qint64 last  = std::min(total - 1, st.xToSample(rect.right(), sr));
+    // Extend one sample past each edge so the polyline reaches the screen
+    // borders — a partial line to the off-screen neighbour — instead of
+    // stopping at the last fully-visible sample (which left a blank strip
+    // on the right at deep zoom).
+    const qint64 first = std::max(qint64(0), st.xToSample(rect.left(), sr) - 1);
+    const qint64 last  = std::min(total - 1, st.xToSample(rect.right(), sr) + 1);
     if (last < first) return;
 
     const double samplesPerPixel = sr * st.scale();
@@ -74,13 +78,23 @@ void AnalogSignalTrace::paintMid(QPainter &p, const QRect &rect,
             const auto &L = env.level(level);
             qint64 bucket = L.bucketSize;
             qint64 firstBucket = first / bucket;
-            qint64 lastBucket = last / bucket;
+            qint64 lastBucket = last / bucket + 1;   // one past the right edge.
+            // Draw each column's min..max bar AND connect it to the
+            // previous column's min/max, so flat runs (min≈max, otherwise
+            // isolated dots) stay a continuous line — every point linked.
+            bool have = false;
+            double px = 0, pMinY = 0, pMaxY = 0;
             for (qint64 b = firstBucket; b <= lastBucket; ++b) {
                 if (b < 0 || b >= L.minima.size()) continue;
                 double x = st.sampleToX(b * bucket, sr);
                 double yMin = yFor(L.minima[b] * seg->scale() + seg->offset());
                 double yMax = yFor(L.maxima[b] * seg->scale() + seg->offset());
                 p.drawLine(QPointF(x, yMin), QPointF(x, yMax));
+                if (have) {
+                    p.drawLine(QPointF(px, pMaxY), QPointF(x, yMax));
+                    p.drawLine(QPointF(px, pMinY), QPointF(x, yMin));
+                }
+                px = x; pMinY = yMin; pMaxY = yMax; have = true;
             }
         }
     }
