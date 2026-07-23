@@ -55,6 +55,27 @@ set_target_properties(openmso-data PROPERTIES
     POSITION_INDEPENDENT_CODE ON
 )
 
+# Measurement library. Pure analysis over data/ segments — no view, no
+# Qt Widgets. Feeds the measurement dock (and later derived channels).
+
+add_library(openmso-measure STATIC
+    measure/Measure.cpp
+    measure/Measure.h
+)
+
+target_include_directories(openmso-measure PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+target_link_libraries(openmso-measure PUBLIC
+    openmso-data
+    Qt6::Core
+)
+
+set_target_properties(openmso-measure PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+)
+
 # View library. Depends on data/ and Qt6 Gui/Widgets. Never calls ocp/
 # or ui/ (layering rule 2 in 04-architecture.md).
 
@@ -127,6 +148,8 @@ qt_add_executable(openmso-gui
     main.cpp
     ui/MainWindow.cpp
     ui/MainWindow.h
+    ui/MeasurementsPanel.cpp
+    ui/MeasurementsPanel.h
     ui/Session.cpp
     ui/Session.h
 )
@@ -142,6 +165,7 @@ target_compile_definitions(openmso-gui PRIVATE
 target_link_libraries(openmso-gui PRIVATE
     openmso-data
     openmso-view
+    openmso-measure
     openmso-ocp
     openmso-util
     Qt6::Core

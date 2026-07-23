@@ -13,6 +13,8 @@ namespace openmso::view { class TraceView; }
 
 namespace openmso::ui {
 
+class MeasurementsPanel;
+
 // Main window. Owns the Session (plugin client + capture) and the
 // TraceView. Per docs/gui-plan/09-ui-layout.md.
 class MainWindow : public QMainWindow {
@@ -60,6 +62,7 @@ private:
 
     // Core.
     view::TraceView *traceView_ = nullptr;
+    MeasurementsPanel *measurements_ = nullptr;
     Session *session_ = nullptr;
     QString pluginsDir_;
 };

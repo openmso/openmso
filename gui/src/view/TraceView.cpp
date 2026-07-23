@@ -99,11 +99,13 @@ void TraceView::setCapture(data::Capture *cap)
         connect(capture_, &data::Capture::captureEnded, this, [this]{
             rebuildTraces();
             fitToData();
+            emit dataChanged();
         });
         // Live data extends the clamp bounds (and needs a repaint).
         connect(capture_, &data::Capture::dataAppended, this, [this]{
             updateDataSpan();
             viewport_->update();
+            emit dataChanged();
         });
     }
     rebuildTraces();
@@ -153,6 +155,14 @@ void TraceView::rebuildTraces()
     updateDataSpan();
     syncScrollBars();
     update();
+}
+
+data::Signal *TraceView::selectedSignal() const
+{
+    const int r = state_->selectedRow();
+    if (r < 0 || r >= traces_.size()) return nullptr;
+    auto *t = qobject_cast<SignalTrace *>(traces_[r].data());
+    return t ? t->signal() : nullptr;
 }
 
 void TraceView::updateDataSpan()

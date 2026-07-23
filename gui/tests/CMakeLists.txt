@@ -6,6 +6,8 @@ add_executable(tst_mainwindow
     tst_mainwindow.cpp
     ../src/ui/MainWindow.cpp
     ../src/ui/MainWindow.h
+    ../src/ui/MeasurementsPanel.cpp
+    ../src/ui/MeasurementsPanel.h
     ../src/ui/Session.cpp
     ../src/ui/Session.h
 )
@@ -17,6 +19,7 @@ target_include_directories(tst_mainwindow PRIVATE
 target_link_libraries(tst_mainwindow PRIVATE
     openmso-data
     openmso-view
+    openmso-measure
     openmso-ocp
     Qt6::Core
     Qt6::Gui
@@ -105,11 +108,34 @@ set_tests_properties(tst_view PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
 )
 
+# --- tst_measure: measurement engine test -------------------------------
+
+add_executable(tst_measure
+    tst_measure.cpp
+)
+
+target_include_directories(tst_measure PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+)
+
+target_link_libraries(tst_measure PRIVATE
+    openmso-data
+    openmso-measure
+    Qt6::Core
+    Qt6::Test
+)
+
+add_test(NAME tst_measure COMMAND tst_measure)
+set_tests_properties(tst_measure PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+)
+
 # --- m2_smoke: end-to-end demo plugin → capture → render ---------------
 
 qt_add_executable(m2_smoke
     m2_smoke.cpp
     ../src/ui/MainWindow.cpp
+    ../src/ui/MeasurementsPanel.cpp
     ../src/ui/Session.cpp
 )
 target_include_directories(m2_smoke PRIVATE
@@ -121,6 +147,7 @@ target_compile_definitions(m2_smoke PRIVATE
 target_link_libraries(m2_smoke PRIVATE
     openmso-data
     openmso-view
+    openmso-measure
     openmso-ocp
     Qt6::Core
     Qt6::Gui

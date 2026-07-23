@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 
+#include "MeasurementsPanel.h"
 #include "view/TraceView.h"
 #include "data/Capture.h"
 #include "ocp/PluginManifest.h"
@@ -15,6 +16,7 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QSplitter>
 #include <QStatusBar>
 #include <QToolBar>
 #include <QWidget>
@@ -41,7 +43,20 @@ MainWindow::MainWindow(QWidget *parent)
     }
 
     traceView_ = new view::TraceView(this);
-    setCentralWidget(traceView_);
+    measurements_ = new MeasurementsPanel(traceView_, this);
+
+    // TraceView and the measurements panel share a horizontal splitter as
+    // the central widget. A splitter handle resizes via Qt's implicit
+    // press-grab (Wayland-safe), unlike a QDockWidget separator which
+    // needs an explicit mouse grab the Wayland compositor won't give.
+    auto *split = new QSplitter(Qt::Horizontal, this);
+    split->addWidget(traceView_);
+    split->addWidget(measurements_);
+    split->setStretchFactor(0, 1);   // TraceView takes any extra width.
+    split->setStretchFactor(1, 0);
+    split->setChildrenCollapsible(false);
+    setCentralWidget(split);
+    measurements_->hide();   // off by default; toggle from the View menu.
 
     buildActions();
     buildMenus();
@@ -111,6 +126,11 @@ void MainWindow::buildMenus()
     viewMenu->addAction(tr("Previous edge"),
                         QKeySequence(Qt::SHIFT | Qt::Key_E),
                         traceView_, &view::TraceView::prevEdge);
+    viewMenu->addSeparator();
+    auto *measAction = viewMenu->addAction(tr("Measurements"));
+    measAction->setCheckable(true);
+    measAction->setChecked(false);
+    connect(measAction, &QAction::toggled, measurements_, &QWidget::setVisible);
 
     auto *helpMenu = bar->addMenu(tr("&Help"));
     helpMenu->addAction(tr("About OpenMSO"), this, [this]{

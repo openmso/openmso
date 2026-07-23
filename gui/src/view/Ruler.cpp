@@ -77,15 +77,6 @@ void Ruler::paintEvent(QPaintEvent *)
             p.drawLine(x, r.top(), x, r.bottom());
             p.drawText(x + 3, r.top() + 12, "B");
         }
-        if (st_->cursorA() >= 0 && st_->cursorB() >= 0) {
-            double dt = std::abs(st_->cursorB() - st_->cursorA());
-            QString label = QStringLiteral("Δt=%1  f=%2")
-                                .arg(util::formatDelta(dt))
-                                .arg(dt > 0 ? util::formatTime(1.0 / dt)
-                                            : QStringLiteral("∞"));
-            p.setPen(palette().text().color());
-            p.drawText(r.center().x() - 60, r.top() + 12, label);
-        }
     }
 }
 

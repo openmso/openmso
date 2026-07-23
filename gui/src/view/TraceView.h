@@ -9,7 +9,7 @@
 class QSplitter;
 class QScrollBar;
 
-namespace openmso::data { class Capture; }
+namespace openmso::data { class Capture; class Signal; }
 
 namespace openmso::view {
 
@@ -31,6 +31,10 @@ public:
 
     ViewState *state() { return state_; }
 
+    // The data::Signal backing the currently selected row, or nullptr if
+    // nothing is selected. Used by the measurement dock.
+    data::Signal *selectedSignal() const;
+
     // Set the time scale so the whole capture fits the viewport width,
     // with the start of the data at the left edge.
     void fitToData();
@@ -45,6 +49,9 @@ public:
 
 signals:
     void cursorMoved(double a, double b);
+    // Capture data changed (chunk appended or capture ended) — the
+    // measurement dock recomputes on this and on ViewState::changed.
+    void dataChanged();
 
 protected:
     void resizeEvent(QResizeEvent *e) override;
