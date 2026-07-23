@@ -82,6 +82,8 @@ set_target_properties(openmso-measure PROPERTIES
 add_library(openmso-view STATIC
     view/AnalogSignalTrace.cpp
     view/AnalogSignalTrace.h
+    view/ChannelModel.cpp
+    view/ChannelModel.h
     view/Header.cpp
     view/Header.h
     view/LogicSignalTrace.cpp

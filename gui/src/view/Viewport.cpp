@@ -1,5 +1,6 @@
 #include "Viewport.h"
 
+#include "ChannelModel.h"
 #include "LogicSignalTrace.h"
 #include "Trace.h"
 #include "data/LogicSegment.h"
@@ -38,20 +39,23 @@ void Viewport::setViewState(ViewState *st)
     update();
 }
 
-void Viewport::setTraces(const QList<Trace *> &traces)
+void Viewport::setChannelModel(ChannelModel *model)
 {
-    traces_.clear();
-    for (auto *t : traces) {
-        if (!t) continue;
-        t->setParent(this);
-        traces_.append(t);
-    }
-    update();
+    if (model_ == model) return;
+    if (model_) disconnect(model_, nullptr, this, nullptr);
+    model_ = model;
+    if (model_)
+        connect(model_, &ChannelModel::changed, this,
+                &Viewport::refreshFromModel);
+    refreshFromModel();
 }
 
-void Viewport::clearTraces()
+void Viewport::refreshFromModel()
 {
     traces_.clear();
+    if (model_)
+        for (auto *t : model_->traces())
+            if (t) traces_.append(t);
     update();
 }
 

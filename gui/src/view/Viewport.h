@@ -9,6 +9,7 @@
 namespace openmso::view {
 
 class Trace;
+class ChannelModel;
 
 // Central waveform area. Owns the trace list, paints them in stacked
 // rows, and handles mouse/keyboard interaction (zoom, pan, cursors).
@@ -23,8 +24,9 @@ public:
     // repaints itself whenever the state signals changed().
     void setViewState(ViewState *st);
 
-    void setTraces(const QList<Trace *> &traces);
-    void clearTraces();
+    // Inject the shared channel model (owned by TraceView). The viewport
+    // reads the row list from it and repaints on changed().
+    void setChannelModel(ChannelModel *model);
 
     // Zoom the time axis around the viewport center (factor < 1 zooms
     // in). Toggle the cursor pair on/off.
@@ -68,8 +70,10 @@ private:
     // only within a small pixel threshold so fine placement stays
     // possible. Returns `t` unchanged when there's nothing to snap to.
     double snapTime(double t) const;
+    void refreshFromModel();
 
-    QList<QPointer<Trace>> traces_;
+    QList<QPointer<Trace>> traces_;   // mirror of model rows, for paint.
+    ChannelModel *model_ = nullptr;   // shared, owned by TraceView.
     ViewState *state_ = nullptr;   // shared, owned by TraceView.
 
     // Cursor selection: left-drag lays down a time range (like selecting

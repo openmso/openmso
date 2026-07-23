@@ -17,6 +17,7 @@ class Header;
 class Ruler;
 class Viewport;
 class Trace;
+class ChannelModel;
 
 // Composite widget: Header (left) + Ruler/Viewport (right). Owns the
 // trace list and the shared ViewState. Per docs/gui-plan/06-rendering.md.
@@ -71,7 +72,7 @@ private:
     QScrollBar *vscroll_;
     QScrollBar *hscroll_;
     QPointer<data::Capture> capture_;
-    QList<QPointer<Trace>> traces_;
+    ChannelModel *channels_;   // ordered row list, owned here.
 };
 
 } // namespace openmso::view

@@ -1,9 +1,9 @@
 #include "TraceView.h"
 
-#include "AnalogSignalTrace.h"
+#include "ChannelModel.h"
 #include "Header.h"
-#include "LogicSignalTrace.h"
 #include "Ruler.h"
+#include "SignalTrace.h"
 #include "Viewport.h"
 
 #include "data/Capture.h"
@@ -29,6 +29,11 @@ TraceView::TraceView(QWidget *parent)
     // Viewport, Ruler and Header all hold this same pointer, mutate it
     // through its setters, and repaint when it emits changed().
     state_ = new ViewState(this);
+
+    // The ordered, mutable channel list — single source of truth for row
+    // order/membership, decoupled from the Capture. Header/Viewport read
+    // it and repaint on changed().
+    channels_ = new ChannelModel(this);
 
     // Layout:
     //   ┌──────┬─────────┐
@@ -56,6 +61,17 @@ TraceView::TraceView(QWidget *parent)
     header_->setViewState(state_);
     ruler_->setViewState(state_);
     viewport_->setViewState(state_);
+    header_->setChannelModel(channels_);
+    viewport_->setChannelModel(channels_);
+
+    // Row membership/order changed: drop a stale selection, resize the
+    // vertical scroll range, repaint.
+    connect(channels_, &ChannelModel::changed, this, [this] {
+        if (state_->selectedRow() >= channels_->count())
+            state_->setSelectedRow(-1);
+        syncScrollBars();
+        update();
+    });
 
     //   ┌──────┬─────────┬──┐
     //   │corner│  Ruler  │  │
@@ -113,55 +129,18 @@ void TraceView::setCapture(data::Capture *cap)
 
 void TraceView::rebuildTraces()
 {
-    traces_.clear();
-    QList<Trace*> list;
-
-    // Colors follow the platform theme (dark is primary). Ownership of
-    // the color lives on data::Signal; the trace mirrors it for paint.
-    const util::Theme theme = util::themeFor(palette());
-
-    if (capture_) {
-        const auto sigs = capture_->allSignals();
-        for (auto *sig : sigs) {
-            if (!sig) continue;
-            Trace *t = nullptr;
-            if (sig->kind() == data::SignalKind::Analog) {
-                sig->setColor(util::analogColor(sig->channelIndex(), theme));
-                t = new AnalogSignalTrace(sig, this);
-            } else {
-                // Exactly one trace per logic channel. The channel's
-                // ordinal is its bit position within the packed segment
-                // unit and its resistor-code color index.
-                const int bit = std::max(0, sig->channelIndex());
-                sig->setColor(util::logicColor(sig->channelIndex(), theme));
-                t = new LogicSignalTrace(sig, bit, this);
-            }
-            t->setColor(sig->color());
-            list.append(t);
-        }
-    }
-
-    for (auto *t : list) traces_.append(t);
-    viewport_->setTraces(list);
-    header_->setTraces(list);
-
-    // No channel is selected by default (selectedRow stays -1). Cursor
-    // snapping and n/N edge navigation act only once the user picks a
-    // channel (click a lane/header, or Tab). Clear any stale selection
-    // that no longer points at a valid row after a rebuild.
-    if (state_->selectedRow() >= list.size())
-        state_->setSelectedRow(-1);
-
+    // Reconcile the channel model with the capture. The model preserves
+    // any user reordering and (later) keeps derived rows; it emits
+    // changed(), which drives the selection clamp, scroll resize and
+    // repaint (wired in the constructor). Colours follow the platform
+    // theme (dark is primary).
+    channels_->syncFromCapture(capture_, util::themeFor(palette()));
     updateDataSpan();
-    syncScrollBars();
-    update();
 }
 
 data::Signal *TraceView::selectedSignal() const
 {
-    const int r = state_->selectedRow();
-    if (r < 0 || r >= traces_.size()) return nullptr;
-    auto *t = qobject_cast<SignalTrace *>(traces_[r].data());
+    auto *t = qobject_cast<SignalTrace *>(channels_->at(state_->selectedRow()));
     return t ? t->signal() : nullptr;
 }
 

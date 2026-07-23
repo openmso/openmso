@@ -7,9 +7,12 @@
 #include "data/Capture.h"
 #include "data/LogicSegment.h"
 #include "data/Signal.h"
+#include "util/ChannelColors.h"
 #include "view/AnalogSignalTrace.h"
+#include "view/ChannelModel.h"
 #include "view/LogicSignalTrace.h"
 #include "view/Ruler.h"
+#include "view/SignalTrace.h"
 #include "view/TraceView.h"
 #include "view/ViewState.h"
 #include "view/Viewport.h"
@@ -28,6 +31,7 @@ private slots:
     void clampNeverShowsBlankSpace();
     void edgeQueriesFindTransitions();
     void selectedRowRoundTrips();
+    void channelModelReordersAndPreservesOrder();
 };
 
 namespace {
@@ -209,6 +213,46 @@ void TestView::selectedRowRoundTrips()
     QCOMPARE(spy.count(), 1);
     st.setSelectedRow(3);                        // no-op: no extra signal.
     QCOMPARE(spy.count(), 1);
+}
+
+// The channel model is the ordered, mutable row list decoupled from the
+// Capture. It must mirror the capture's signals on first sync, let rows be
+// moved, and preserve that order (and trace identity) across later syncs.
+void TestView::channelModelReordersAndPreservesOrder()
+{
+    Capture cap;
+    cap.beginCapture(1e6, 0.0, {
+        {"D0", "D0", SignalKind::Logic},
+        {"D1", "D1", SignalKind::Logic},
+        {"D2", "D2", SignalKind::Logic},
+    });
+
+    ChannelModel model;
+    auto idAt = [&](int r) {
+        auto *t = qobject_cast<SignalTrace *>(model.at(r));
+        return (t && t->signal()) ? t->signal()->id() : QString();
+    };
+
+    model.syncFromCapture(&cap, openmso::util::Theme::Dark);
+    QCOMPARE(model.count(), 3);
+    QCOMPARE(idAt(0), QStringLiteral("D0"));
+    QCOMPARE(idAt(1), QStringLiteral("D1"));
+    QCOMPARE(idAt(2), QStringLiteral("D2"));
+
+    // Move D0 to the bottom (QList::move semantics).
+    model.move(0, 2);
+    QCOMPARE(idAt(0), QStringLiteral("D1"));
+    QCOMPARE(idAt(1), QStringLiteral("D2"));
+    QCOMPARE(idAt(2), QStringLiteral("D0"));
+
+    // A re-sync (e.g. captureEnded) preserves the reordering — no
+    // duplicates, no re-add, and the same Trace object stays at row 0.
+    Trace *row0 = model.at(0);
+    model.syncFromCapture(&cap, openmso::util::Theme::Dark);
+    QCOMPARE(model.count(), 3);
+    QCOMPARE(idAt(0), QStringLiteral("D1"));
+    QCOMPARE(idAt(2), QStringLiteral("D0"));
+    QCOMPARE(model.at(0), row0);
 }
 
 QTEST_MAIN(TestView)
