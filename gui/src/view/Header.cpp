@@ -5,6 +5,7 @@
 #include "SignalTrace.h"
 
 #include <QFontMetrics>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPaintEvent>
 #include <QPalette>
@@ -43,10 +44,19 @@ void Header::paintEvent(QPaintEvent *)
     p.fillRect(r, palette().window());
 
     const QFontMetrics fm = p.fontMetrics();
+    const int selected = st_ ? st_->selectedRow() : -1;
     int y = st_ ? -st_->yOffset() : 0;
+    int rowIndex = 0;
     for (const auto &t : traces_) {
-        if (!t) continue;
+        if (!t) { ++rowIndex; continue; }
         QRect row(r.left(), y, r.width(), t->height());
+        // Highlight the selected row so it's clear which channel the
+        // cursor snap and n/N edge navigation act on.
+        if (rowIndex == selected) {
+            QColor hl = palette().highlight().color();
+            hl.setAlpha(48);
+            p.fillRect(row, hl);
+        }
         // Vertically centre the swatch and label on the waveform's
         // midline (top + h/2), where the logic high/low pair and the
         // analog baseline are centred, so the label lines up with its
@@ -62,9 +72,41 @@ void Header::paintEvent(QPaintEvent *)
             if (st->signal()) name = st->signal()->name();
         }
         if (name.isEmpty()) name = QStringLiteral("?");
-        p.drawText(row.left() + 22, mid + fm.ascent() / 2 - 1, name);
+        if (rowIndex == selected) {
+            QFont f = p.font();
+            f.setBold(true);
+            p.setFont(f);
+            p.drawText(row.left() + 22, mid + fm.ascent() / 2 - 1, name);
+            f.setBold(false);
+            p.setFont(f);
+        } else {
+            p.drawText(row.left() + 22, mid + fm.ascent() / 2 - 1, name);
+        }
         y += t->height();
+        ++rowIndex;
     }
+}
+
+int Header::rowAt(int y) const
+{
+    int top = st_ ? -st_->yOffset() : 0;
+    int i = 0;
+    for (const auto &t : traces_) {
+        if (!t) { ++i; continue; }
+        const int h = t->height();
+        if (y >= top && y < top + h) return i;
+        top += h;
+        ++i;
+    }
+    return -1;
+}
+
+void Header::mousePressEvent(QMouseEvent *e)
+{
+    if (!st_) return;
+    const int row = rowAt(int(e->position().y()));
+    if (row >= 0)
+        st_->setSelectedRow(row);
 }
 
 } // namespace openmso::view

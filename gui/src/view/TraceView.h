@@ -39,6 +39,9 @@ public:
     void zoomIn();
     void zoomOut();
     void toggleCursors();
+    // Move cursor A to the next/previous edge on the selected channel.
+    void nextEdge();
+    void prevEdge();
 
 signals:
     void cursorMoved(double a, double b);

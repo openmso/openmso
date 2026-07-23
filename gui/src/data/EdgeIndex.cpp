@@ -81,4 +81,33 @@ QVector<qint64> EdgeIndex::edgesInRange(int chan, qint64 first, qint64 last,
     return out;
 }
 
+qint64 EdgeIndex::nextEdge(int chan, qint64 after) const
+{
+    if (chan < 0 || chan >= edges_.size()) return -1;
+    const auto &v = edges_[chan];
+    auto it = std::upper_bound(v.begin(), v.end(), after);
+    return it == v.end() ? -1 : *it;
+}
+
+qint64 EdgeIndex::prevEdge(int chan, qint64 before) const
+{
+    if (chan < 0 || chan >= edges_.size()) return -1;
+    const auto &v = edges_[chan];
+    auto it = std::lower_bound(v.begin(), v.end(), before);
+    return it == v.begin() ? -1 : *(it - 1);
+}
+
+qint64 EdgeIndex::nearestEdge(int chan, qint64 sample) const
+{
+    if (chan < 0 || chan >= edges_.size()) return -1;
+    const auto &v = edges_[chan];
+    if (v.isEmpty()) return -1;
+    auto it = std::lower_bound(v.begin(), v.end(), sample);
+    if (it == v.end()) return v.last();          // past the last edge.
+    if (*it == sample) return sample;            // exact hit.
+    if (it == v.begin()) return *it;             // before the first edge.
+    const qint64 hi = *it, lo = *(it - 1);       // straddling neighbours.
+    return (sample - lo <= hi - sample) ? lo : hi;
+}
+
 } // namespace openmso::data

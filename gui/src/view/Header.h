@@ -25,9 +25,14 @@ public:
 
 protected:
     void paintEvent(QPaintEvent *e) override;
+    void mousePressEvent(QMouseEvent *e) override;
     QSize sizeHint() const override { return {140, 0}; }
 
 private:
+    // Index of the trace row containing viewport-y `y` (accounting for the
+    // vertical scroll offset), or -1 if none.
+    int rowAt(int y) const;
+
     QList<QPointer<Trace>> traces_;
     ViewState *st_ = nullptr;   // shared, owned by TraceView.
 };

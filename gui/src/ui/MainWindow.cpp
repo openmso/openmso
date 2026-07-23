@@ -105,6 +105,12 @@ void MainWindow::buildMenus()
                         traceView_, &view::TraceView::fitToData);
     viewMenu->addAction(tr("Toggle cursors"), QKeySequence(Qt::Key_C),
                         traceView_, &view::TraceView::toggleCursors);
+    viewMenu->addSeparator();
+    viewMenu->addAction(tr("Next edge"), QKeySequence(Qt::Key_E),
+                        traceView_, &view::TraceView::nextEdge);
+    viewMenu->addAction(tr("Previous edge"),
+                        QKeySequence(Qt::SHIFT | Qt::Key_E),
+                        traceView_, &view::TraceView::prevEdge);
 
     auto *helpMenu = bar->addMenu(tr("&Help"));
     helpMenu->addAction(tr("About OpenMSO"), this, [this]{

@@ -89,6 +89,13 @@ void ViewState::setYOffset(int y)
     emit changed();
 }
 
+void ViewState::setSelectedRow(int r)
+{
+    if (r == selectedRow_) return;
+    selectedRow_ = r;
+    emit changed();
+}
+
 void ViewState::setCursors(double a, double b)
 {
     if (a == cursorA_ && b == cursorB_) return;

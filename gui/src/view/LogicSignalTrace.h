@@ -16,6 +16,10 @@ public:
     void paintMid(QPainter &p, const QRect &rect,
                   const ViewState &st) override;
 
+    // Bit position of this channel within the packed logic unit — the
+    // key for edge-index queries (snap, next/prev-edge navigation).
+    int bitIndex() const { return bitIndex_; }
+
 private:
     int bitIndex_;
 };

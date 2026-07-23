@@ -26,6 +26,8 @@ private slots:
     void paintWithCapture();
     void paintEmptyCapture();
     void clampNeverShowsBlankSpace();
+    void edgeQueriesFindTransitions();
+    void selectedRowRoundTrips();
 };
 
 namespace {
@@ -157,6 +159,56 @@ void TestView::clampNeverShowsBlankSpace()
     // Scroll before the start clamps to the start.
     st.setOffset(-1.0);
     QCOMPARE(st.offset(), 0.0);
+}
+
+// The edge-query API that cursor snapping and n/N navigation are built
+// on. One bit, edges laid down at known samples; verify next/prev are
+// strict (skip an edge sitting on the reference) and nearest is inclusive.
+void TestView::edgeQueriesFindTransitions()
+{
+    // A single logic channel (1 bit) that toggles every 10 samples over
+    // 100 samples ⇒ edges at 10, 20, 30, ... , 90.
+    LogicSegment seg(1, 1);
+    seg.setSamplerate(1e6);
+    QByteArray bytes(100, '\0');
+    for (int i = 0; i < 100; ++i)
+        bytes[i] = char((i / 10) & 1);
+    seg.appendChunk(bytes, 0, 100);
+
+    // Next edge is strict: from a sample *on* an edge it skips to the next.
+    QCOMPARE(seg.nextEdge(0, 0), qint64(10));
+    QCOMPARE(seg.nextEdge(0, 10), qint64(20));
+    QCOMPARE(seg.nextEdge(0, 15), qint64(20));
+    QCOMPARE(seg.nextEdge(0, 90), qint64(-1));   // no edge after the last.
+
+    // Previous edge is strict in the other direction.
+    QCOMPARE(seg.prevEdge(0, 100), qint64(90));
+    QCOMPARE(seg.prevEdge(0, 20), qint64(10));
+    QCOMPARE(seg.prevEdge(0, 15), qint64(10));
+    QCOMPARE(seg.prevEdge(0, 10), qint64(-1));    // no edge before the first.
+
+    // Nearest is inclusive and picks the closer neighbour.
+    QCOMPARE(seg.nearestEdge(0, 20), qint64(20)); // exact hit.
+    QCOMPARE(seg.nearestEdge(0, 22), qint64(20));
+    QCOMPARE(seg.nearestEdge(0, 27), qint64(30));
+    QCOMPARE(seg.nearestEdge(0, 0), qint64(10));  // before the first edge.
+    QCOMPARE(seg.nearestEdge(0, 99), qint64(90)); // past the last edge.
+
+    // An out-of-range bit yields no edge, never a crash.
+    QCOMPARE(seg.nextEdge(5, 0), qint64(-1));
+}
+
+void TestView::selectedRowRoundTrips()
+{
+    ViewState st;
+    QCOMPARE(st.selectedRow(), -1);              // nothing selected by default.
+
+    QSignalSpy spy(&st, &ViewState::changed);
+    st.setSelectedRow(3);
+    QCOMPARE(st.selectedRow(), 3);
+    QCOMPARE(spy.count(), 1);
+    st.setSelectedRow(3);                        // no-op: no extra signal.
+    QCOMPARE(spy.count(), 1);
 }
 
 QTEST_MAIN(TestView)

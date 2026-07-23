@@ -30,6 +30,15 @@ public:
     QVector<qint64> edgesInRange(int chan, qint64 first, qint64 last,
                                  bool *prevValue = nullptr) const;
 
+    // Single-edge queries for cursor snapping and edge navigation. All
+    // return a sample index, or -1 if there is no such edge. `nextEdge`
+    // and `prevEdge` are *strict* (an edge sitting exactly on `after` /
+    // `before` is skipped, so repeated calls step through transitions);
+    // `nearestEdge` is inclusive (an edge on `sample` returns `sample`).
+    qint64 nextEdge(int chan, qint64 after) const;
+    qint64 prevEdge(int chan, qint64 before) const;
+    qint64 nearestEdge(int chan, qint64 sample) const;
+
 private:
     // edges_[chan] = sorted sample indices where bit `chan` flipped.
     QVector<QVector<qint64>> edges_;

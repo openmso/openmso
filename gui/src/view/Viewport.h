@@ -31,11 +31,20 @@ public:
     void zoom(double factor);
     void toggleCursors();
 
+    // Move cursor A to the next (dir > 0) or previous (dir < 0) edge on
+    // the selected logic channel, relative to A's current position (or
+    // the view centre if A is inactive). Cursor B is left parked so Δt
+    // updates live as you step. No-op unless a logic channel is selected.
+    void navigateEdge(int dir);
+
     // Total vertical pixels needed for all traces.
     int contentHeight() const;
 
 protected:
     void paintEvent(QPaintEvent *e) override;
+    // Repurpose Tab / Shift+Tab to step the channel selection instead of
+    // moving keyboard focus out of the viewport.
+    bool focusNextPrevChild(bool next) override;
     void wheelEvent(QWheelEvent *e) override;
     void mousePressEvent(QMouseEvent *e) override;
     void mouseMoveEvent(QMouseEvent *e) override;
@@ -46,6 +55,19 @@ private:
     void zoomAt(double x, double factor);
     // Horizontal pan by a pixel delta (positive = content moves left).
     void panPixels(double dxPixels);
+
+    // Row (trace index) at viewport-y `y`, or -1. The selected logic
+    // trace, or nullptr if the selection is empty or not a logic channel.
+    int rowAt(int y) const;
+    class LogicSignalTrace *selectedLogicTrace() const;
+    // Move the channel selection by `dir` rows (wrapping), scrolling the
+    // newly selected row into view.
+    void selectChannel(int dir);
+    void ensureRowVisible(int row);
+    // Snap a time to the nearest edge of the selected logic channel, but
+    // only within a small pixel threshold so fine placement stays
+    // possible. Returns `t` unchanged when there's nothing to snap to.
+    double snapTime(double t) const;
 
     QList<QPointer<Trace>> traces_;
     ViewState *state_ = nullptr;   // shared, owned by TraceView.

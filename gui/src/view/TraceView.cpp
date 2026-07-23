@@ -142,6 +142,14 @@ void TraceView::rebuildTraces()
     for (auto *t : list) traces_.append(t);
     viewport_->setTraces(list);
     header_->setTraces(list);
+
+    // No channel is selected by default (selectedRow stays -1). Cursor
+    // snapping and n/N edge navigation act only once the user picks a
+    // channel (click a lane/header, or Tab). Clear any stale selection
+    // that no longer points at a valid row after a rebuild.
+    if (state_->selectedRow() >= list.size())
+        state_->setSelectedRow(-1);
+
     updateDataSpan();
     syncScrollBars();
     update();
@@ -218,6 +226,8 @@ void TraceView::resizeEvent(QResizeEvent *e)
 void TraceView::zoomIn()  { viewport_->zoom(0.8); }
 void TraceView::zoomOut() { viewport_->zoom(1.25); }
 void TraceView::toggleCursors() { viewport_->toggleCursors(); }
+void TraceView::nextEdge() { viewport_->navigateEdge(+1); }
+void TraceView::prevEdge() { viewport_->navigateEdge(-1); }
 
 void TraceView::onDataChanged()
 {

@@ -40,6 +40,19 @@ public:
     // Const because building is a lazy cache mutation.
     const EdgeIndex &edgeIndex() const;
 
+    // Convenience edge queries for one bit, in sample units. Build the
+    // index lazily (like edgeIndex()) and forward to it. -1 if none.
+    // `bit` is the channel's bit position within the packed unit.
+    qint64 nextEdge(int bit, qint64 after) const {
+        return edgeIndex().nextEdge(bit, after);
+    }
+    qint64 prevEdge(int bit, qint64 before) const {
+        return edgeIndex().prevEdge(bit, before);
+    }
+    qint64 nearestEdge(int bit, qint64 sample) const {
+        return edgeIndex().nearestEdge(bit, sample);
+    }
+
     // Read lock for concurrent paint during capture. The GUI thread
     // appends; the (future) paint thread reads. For v0.1 paint is on
     // the GUI thread too, but the lock is here for correctness.

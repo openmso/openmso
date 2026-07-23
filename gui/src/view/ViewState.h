@@ -41,6 +41,12 @@ public:
     // the viewport. 0 = first trace flush with the top.
     int yOffset() const { return yOffset_; }
 
+    // The row (index into the view's trace list) the user is working
+    // with: it is highlighted in the header and viewport, and is the
+    // target of cursor edge-snapping and next/prev-edge navigation.
+    // -1 = nothing selected.
+    int selectedRow() const { return selectedRow_; }
+
     // Cursors (in seconds). -1 = inactive.
     double cursorA() const { return cursorA_; }
     double cursorB() const { return cursorB_; }
@@ -59,6 +65,7 @@ public:
     void setScaleOffset(double s, double o);
     void setRowHeight(int h);
     void setYOffset(int y);
+    void setSelectedRow(int r);
     void setCursors(double a, double b);
     void setCursorsVisible(bool v);
     void setTriggerPos(double t);
@@ -97,6 +104,7 @@ private:
     int viewportWidth_ = 0;
     int rowHeight_ = 80;
     int yOffset_ = 0;
+    int selectedRow_ = -1;
     double cursorA_ = -1.0;
     double cursorB_ = -1.0;
     bool cursorsVisible_ = false;
