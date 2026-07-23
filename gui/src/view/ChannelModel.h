@@ -2,14 +2,17 @@
 
 #include <QList>
 #include <QObject>
+#include <QSet>
 
+#include "measure/Schmitt.h"
 #include "util/ChannelColors.h"
 
-namespace openmso::data { class Capture; }
+namespace openmso::data { class Capture; class Signal; }
 
 namespace openmso::view {
 
 class Trace;
+class DerivedChannel;
 
 // The ordered, mutable list of channel rows shown in the view. It is the
 // single source of truth for row order and membership — decoupled from
@@ -42,11 +45,28 @@ public:
     // if either index is out of range or from == to. Emits changed().
     void move(int from, int to);
 
+    // Add a derived logic channel: a dual-threshold Schmitt trigger over an
+    // analog `source` signal. Creates a DerivedChannel (owns the async walk
+    // and the synthetic signal) and a logic row for it, inserted directly
+    // below the source. The row survives capture re-syncs and reorders.
+    // Returns the DerivedChannel (owned by the model), or nullptr if the
+    // source isn't usable. Emits changed().
+    DerivedChannel *addDerived(data::Signal *source,
+                               const measure::SchmittParams &params,
+                               util::Theme theme);
+
+    // The DerivedChannel whose output backs `t`, or nullptr if `t` is not a
+    // derived row. Lets the UI reopen the derive dialog to re-tune a row.
+    DerivedChannel *derivedFor(Trace *t) const;
+
 signals:
     void changed();   // membership or order changed — repaint / rescroll
 
 private:
-    QList<Trace *> traces_;   // owned (parented to this)
+    QList<Trace *> traces_;              // owned (parented to this)
+    QList<DerivedChannel *> derived_;    // owned (parented to this)
+    QSet<data::Signal *> derivedSignals_;  // derived output signals
+    QSet<Trace *> derivedTraces_;          // rows to keep across re-sync
 };
 
 } // namespace openmso::view

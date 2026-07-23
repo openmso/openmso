@@ -4,6 +4,7 @@
 #include <QList>
 #include <QPointer>
 
+#include "util/ChannelColors.h"
 #include "view/ViewState.h"
 
 class QSplitter;
@@ -35,6 +36,11 @@ public:
     // The data::Signal backing the currently selected row, or nullptr if
     // nothing is selected. Used by the measurement dock.
     data::Signal *selectedSignal() const;
+
+    // The channel model (ordered row list). The UI uses it to add derived
+    // channels and to map the selection to a source signal.
+    ChannelModel *channels() const { return channels_; }
+    util::Theme theme() const;
 
     // Set the time scale so the whole capture fits the viewport width,
     // with the start of the data at the left edge.

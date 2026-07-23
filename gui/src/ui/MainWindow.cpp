@@ -1,8 +1,12 @@
 #include "MainWindow.h"
 
+#include "DeriveLogicDialog.h"
 #include "MeasurementsPanel.h"
+#include "view/ChannelModel.h"
 #include "view/TraceView.h"
+#include "data/AnalogSegment.h"
 #include "data/Capture.h"
+#include "data/Signal.h"
 #include "ocp/PluginManifest.h"
 
 #include <QAction>
@@ -126,6 +130,9 @@ void MainWindow::buildMenus()
     viewMenu->addAction(tr("Previous edge"),
                         QKeySequence(Qt::SHIFT | Qt::Key_E),
                         traceView_, &view::TraceView::prevEdge);
+    viewMenu->addSeparator();
+    viewMenu->addAction(tr("Derive logic channel…"), this,
+                        &MainWindow::onDeriveLogic);
     viewMenu->addSeparator();
     auto *measAction = viewMenu->addAction(tr("Measurements"));
     measAction->setCheckable(true);
@@ -256,6 +263,26 @@ void MainWindow::onStop()
     if (!session_) return;
     session_->stopCapture();
     updateToolbarState();
+}
+
+void MainWindow::onDeriveLogic()
+{
+    data::Signal *src = traceView_->selectedSignal();
+    if (!src || src->kind() != data::SignalKind::Analog) {
+        QMessageBox::information(this, tr("Derive logic channel"),
+            tr("Select an analog channel first (click its lane or label), "
+               "then derive a logic channel from it."));
+        return;
+    }
+
+    double sr = 0.0;
+    if (auto *seg = qobject_cast<data::AnalogSegment *>(src->primarySegment()))
+        sr = seg->samplerate();
+
+    DeriveLogicDialog dlg(src, sr, this);
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    traceView_->channels()->addDerived(src, dlg.params(), traceView_->theme());
 }
 
 void MainWindow::onCursorMoved(double a, double b)

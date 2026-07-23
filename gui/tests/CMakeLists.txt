@@ -4,6 +4,8 @@
 
 add_executable(tst_mainwindow
     tst_mainwindow.cpp
+    ../src/ui/DeriveLogicDialog.cpp
+    ../src/ui/DeriveLogicDialog.h
     ../src/ui/MainWindow.cpp
     ../src/ui/MainWindow.h
     ../src/ui/MeasurementsPanel.cpp
@@ -134,6 +136,7 @@ set_tests_properties(tst_measure PROPERTIES
 
 qt_add_executable(m2_smoke
     m2_smoke.cpp
+    ../src/ui/DeriveLogicDialog.cpp
     ../src/ui/MainWindow.cpp
     ../src/ui/MeasurementsPanel.cpp
     ../src/ui/Session.cpp

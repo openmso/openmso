@@ -61,6 +61,8 @@ set_target_properties(openmso-data PROPERTIES
 add_library(openmso-measure STATIC
     measure/Measure.cpp
     measure/Measure.h
+    measure/Schmitt.cpp
+    measure/Schmitt.h
 )
 
 target_include_directories(openmso-measure PUBLIC
@@ -84,6 +86,8 @@ add_library(openmso-view STATIC
     view/AnalogSignalTrace.h
     view/ChannelModel.cpp
     view/ChannelModel.h
+    view/DerivedChannel.cpp
+    view/DerivedChannel.h
     view/Header.cpp
     view/Header.h
     view/LogicSignalTrace.cpp
@@ -109,9 +113,11 @@ target_include_directories(openmso-view PUBLIC
 target_link_libraries(openmso-view PUBLIC
     openmso-data
     openmso-util
+    openmso-measure
     Qt6::Core
     Qt6::Gui
     Qt6::Widgets
+    Qt6::Concurrent
 )
 
 set_target_properties(openmso-view PROPERTIES
@@ -148,6 +154,8 @@ set_target_properties(openmso-ocp PROPERTIES
 
 qt_add_executable(openmso-gui
     main.cpp
+    ui/DeriveLogicDialog.cpp
+    ui/DeriveLogicDialog.h
     ui/MainWindow.cpp
     ui/MainWindow.h
     ui/MeasurementsPanel.cpp

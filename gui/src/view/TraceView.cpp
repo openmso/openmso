@@ -144,6 +144,11 @@ data::Signal *TraceView::selectedSignal() const
     return t ? t->signal() : nullptr;
 }
 
+util::Theme TraceView::theme() const
+{
+    return util::themeFor(palette());
+}
+
 void TraceView::updateDataSpan()
 {
     // The rendered time domain is sample 0..sampleCount mapped as

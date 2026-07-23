@@ -37,6 +37,8 @@ private slots:
     void onDeviceReady(const QString &summary);
     void onDeviceError(const QString &msg);
     void onCaptureStateChanged(openmso::data::Capture::State s);
+    // Derive a logic channel from the selected analog channel (Schmitt).
+    void onDeriveLogic();
 
 private:
     void buildActions();

@@ -7,9 +7,11 @@
 #include "data/Capture.h"
 #include "data/LogicSegment.h"
 #include "data/Signal.h"
+#include "measure/Schmitt.h"
 #include "util/ChannelColors.h"
 #include "view/AnalogSignalTrace.h"
 #include "view/ChannelModel.h"
+#include "view/DerivedChannel.h"
 #include "view/LogicSignalTrace.h"
 #include "view/Ruler.h"
 #include "view/SignalTrace.h"
@@ -32,6 +34,8 @@ private slots:
     void edgeQueriesFindTransitions();
     void selectedRowRoundTrips();
     void channelModelReordersAndPreservesOrder();
+    void channelModelSurvivesRecapture();
+    void derivedChannelComputesOffThread();
 };
 
 namespace {
@@ -253,6 +257,87 @@ void TestView::channelModelReordersAndPreservesOrder()
     QCOMPARE(idAt(0), QStringLiteral("D1"));
     QCOMPARE(idAt(2), QStringLiteral("D0"));
     QCOMPARE(model.at(0), row0);
+}
+
+// Regression: a re-capture deletes every Signal and allocates new ones,
+// and the allocator recycles freed addresses — so reconciling rows by
+// Signal pointer bound them to the wrong channel in a nondeterministic
+// order ("random reorder on re-capture"). Reconciliation must be by the
+// stable channel id and must preserve the user's ordering.
+void TestView::channelModelSurvivesRecapture()
+{
+    Capture cap;
+    const QList<Capture::ChannelSpec> specs = {
+        {"D0", "D0", SignalKind::Logic, 0},
+        {"D1", "D1", SignalKind::Logic, 1},
+        {"D2", "D2", SignalKind::Logic, 2},
+    };
+    cap.beginCapture(1e6, 0.0, specs);
+
+    ChannelModel model;
+    auto idAt = [&](int r) {
+        auto *t = qobject_cast<SignalTrace *>(model.at(r));
+        return (t && t->signal()) ? t->signal()->id() : QString();
+    };
+
+    model.syncFromCapture(&cap, openmso::util::Theme::Dark);
+    model.move(0, 2);   // user reorder: D1, D2, D0.
+    QCOMPARE(idAt(0), QStringLiteral("D1"));
+    QCOMPARE(idAt(2), QStringLiteral("D0"));
+
+    // Re-capture: fresh Signal objects (old ones freed; addresses recycled).
+    // Force churn so the allocator is likely to hand back the same slots.
+    for (int i = 0; i < 8; ++i)
+        cap.beginCapture(1e6, 0.0, specs);
+    model.syncFromCapture(&cap, openmso::util::Theme::Dark);
+
+    // Order and identity preserved; every row bound to the *matching* new
+    // Signal (so its trace renders that channel's data, not another's).
+    QCOMPARE(model.count(), 3);
+    QCOMPARE(idAt(0), QStringLiteral("D1"));
+    QCOMPARE(idAt(1), QStringLiteral("D2"));
+    QCOMPARE(idAt(2), QStringLiteral("D0"));
+    for (int r = 0; r < 3; ++r) {
+        auto *t = qobject_cast<SignalTrace *>(model.at(r));
+        QVERIFY(cap.allSignals().contains(t->signal()));   // a live signal.
+        QCOMPARE(t->signal()->id(), t->signalId());        // the right one.
+    }
+}
+
+// The derived channel runs the Schmitt walk on a worker thread and swaps
+// fresh bits back on the GUI thread; drive it through a real event loop and
+// verify the synthetic logic signal ends up with the expected transitions.
+void TestView::derivedChannelComputesOffThread()
+{
+    // A ±1 V square (Int8, scale 0.01) toggling every 10 samples over 100.
+    auto *analog = new Signal("A0", "A0", SignalKind::Analog, nullptr);
+    analog->setChannelIndex(0);
+    auto *seg = new AnalogSegment(AnalogDType::Int8, 0.01, 0.0, "V", analog);
+    seg->setSamplerate(1e6);
+    QByteArray bytes(100, '\0');
+    for (int i = 0; i < 100; ++i)
+        bytes[i] = char(qint8((i / 10) & 1 ? 100 : -100));
+    seg->appendChunk(bytes, 0, 100);
+    analog->appendSegment(seg);
+
+    openmso::measure::SchmittParams p;
+    p.vHigh = 0.5; p.vLow = -0.5;   // straddle 0 with hysteresis.
+    DerivedChannel dc(analog, p);
+
+    QSignalSpy spy(&dc, &DerivedChannel::computed);
+    QVERIFY(spy.wait(5000));        // walk finishes and swaps in on the GUI thread.
+
+    auto *out = dc.signal();
+    QVERIFY(out);
+    QCOMPARE(out->kind(), SignalKind::Logic);
+    auto *lseg = qobject_cast<LogicSegment *>(out->primarySegment());
+    QVERIFY(lseg);
+    QCOMPARE(lseg->appendedSamples(), qint64(100));
+    // Same edge structure as the analog square: transitions every 10 samples.
+    QCOMPARE(lseg->nextEdge(0, 0), qint64(10));
+    QCOMPARE(lseg->nextEdge(0, 10), qint64(20));
+
+    delete analog;
 }
 
 QTEST_MAIN(TestView)

@@ -3,6 +3,7 @@
 #include "data/AnalogSegment.h"
 #include "data/LogicSegment.h"
 #include "measure/Measure.h"
+#include "measure/Schmitt.h"
 
 #include <cmath>
 
@@ -17,6 +18,8 @@ private slots:
     void analogEmptyRange();
     void logicSquareTiming();
     void logicNoTiming();
+    void schmittHysteresisRejectsNoise();
+    void schmittInvertAndDeglitch();
 };
 
 // A ±1.0 V square wave (raw ±100 codes, scale 0.01) over 100 samples:
@@ -91,6 +94,71 @@ void TestMeasure::logicNoTiming()
     QCOMPARE(s.edgeCount, qint64(1));
     QVERIFY(!s.hasTiming);
     QCOMPARE(s.frequency, 0.0);
+}
+
+// Decode a packed 1-bit logic byte stream to a level string for easy
+// assertions ("00110" etc).
+static QString bitsToString(const QByteArray &b)
+{
+    QString s;
+    for (char c : b) s += (c & 1) ? '1' : '0';
+    return s;
+}
+
+// Hysteresis: a signal that dithers around a single crossing level must not
+// produce edges once thresholds straddle it. Ramp up through Vf..Vr region
+// with noise; only a genuine excursion past Vr should latch high.
+void TestMeasure::schmittHysteresisRejectsNoise()
+{
+    // Float samples, scale 1.0. Vr=0.7, Vf=0.3. Values wobble in the
+    // 0.4..0.6 dead-band (between thresholds) after one clean rise, then
+    // fall cleanly. The dead-band wobble must yield NO extra edges.
+    const QVector<double> v = {
+        0.0, 0.1, 0.2,            // low
+        0.8, 0.9,                 // rise past Vr -> high
+        0.6, 0.5, 0.55, 0.45, 0.6,// wobble in dead-band -> stays high
+        0.2, 0.1,                 // fall past Vf -> low
+        0.4, 0.5, 0.45,           // wobble in dead-band -> stays low
+    };
+    QByteArray raw(v.size() * int(sizeof(float)), Qt::Uninitialized);
+    auto *f = reinterpret_cast<float *>(raw.data());
+    for (int i = 0; i < v.size(); ++i) f[i] = float(v[i]);
+
+    SchmittParams p;
+    p.vHigh = 0.7; p.vLow = 0.3;
+    const QByteArray bits = schmittWalk(raw, AnalogDType::Float32, 1.0, 0.0,
+                                        v.size(), p);
+    // low(3) high(2+5) low(2+3): exactly one rise and one fall.
+    QCOMPARE(bitsToString(bits),
+             QStringLiteral("000") + "1111111" + "00000");
+}
+
+// Invert flips levels; de-glitch absorbs a sub-threshold-width pulse into
+// its predecessor.
+void TestMeasure::schmittInvertAndDeglitch()
+{
+    // Clean square: 5 low, 5 high, 5 low (Int8, scale 1). Threshold at 50.
+    QByteArray raw(15, '\0');
+    for (int i = 5; i < 10; ++i) raw[i] = char(100);
+
+    SchmittParams p;
+    p.vHigh = 60; p.vLow = 40;
+
+    // Plain.
+    QCOMPARE(bitsToString(schmittWalk(raw, AnalogDType::Int8, 1.0, 0.0, 15, p)),
+             QStringLiteral("000001111100000"));
+
+    // Inverted.
+    p.invert = true;
+    QCOMPARE(bitsToString(schmittWalk(raw, AnalogDType::Int8, 1.0, 0.0, 15, p)),
+             QStringLiteral("111110000011111"));
+
+    // De-glitch a 5-sample high pulse with a 6-sample minimum: it's shorter
+    // than the minimum, so it's absorbed into the preceding low run.
+    p.invert = false;
+    p.deglitchSamples = 6;
+    QCOMPARE(bitsToString(schmittWalk(raw, AnalogDType::Int8, 1.0, 0.0, 15, p)),
+             QStringLiteral("000000000000000"));
 }
 
 QTEST_MAIN(TestMeasure)
