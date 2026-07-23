@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["openmso-plugin", "sds1000xe"]
+members = ["openmso-plugin", "sds1000xe", "fx2lafw"]
 
 [workspace.package]
 edition = "2021"

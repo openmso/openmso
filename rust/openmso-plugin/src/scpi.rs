@@ -232,6 +232,7 @@ pub fn open_transport(connection: &str) -> Result<Box<dyn Scpi>> {
         };
         return Ok(Box::new(TcpScpi::new(host, port, Duration::from_secs(5))?));
     }
+    #[cfg(target_os = "linux")]
     if let Some(path) = connection.strip_prefix("usbtmc://") {
         return Ok(Box::new(crate::usbtmc::UsbTmcScpi::new(path)?));
     }

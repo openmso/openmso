@@ -8,6 +8,10 @@
 pub mod framing;
 pub mod scpi;
 pub mod server;
+// USBTMC is implemented over Linux usbdevfs (/dev/usbtmc*, /dev/bus/usb,
+// USBDEVFS_RESET) and uses std::os::unix, so it only compiles/works on Linux.
+// Other platforms drive the same instruments over the network (TCP/VXI-11).
+#[cfg(target_os = "linux")]
 pub mod usbtmc;
 pub mod vxi11;
 
