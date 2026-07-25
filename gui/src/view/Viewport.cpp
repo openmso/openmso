@@ -2,11 +2,13 @@
 
 #include "ChannelModel.h"
 #include "LogicSignalTrace.h"
+#include "PaintProfile.h"
 #include "Trace.h"
 #include "data/LogicSegment.h"
 #include "data/Signal.h"
 
 #include <QApplication>
+#include <QDebug>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPaintEvent>
@@ -67,8 +69,15 @@ int Viewport::contentHeight() const
     return h;
 }
 
-void Viewport::paintEvent(QPaintEvent *)
+void Viewport::paintEvent(QPaintEvent *ev)
 {
+    if (paintProfileEnabled()) {
+        static int n = 0;
+        const QRect u = ev->rect();
+        qDebug("[paint-prof] viewport repaint #%d region=%dx%d@%d,%d full=%d",
+               ++n, u.width(), u.height(), u.x(), u.y(), int(u == rect()));
+    }
+
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing, true);
 

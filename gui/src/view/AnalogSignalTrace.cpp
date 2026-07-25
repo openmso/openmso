@@ -1,7 +1,10 @@
 #include "AnalogSignalTrace.h"
 
+#include "PaintProfile.h"
 #include "data/Signal.h"
 
+#include <QDebug>
+#include <QElapsedTimer>
 #include <QPainter>
 #include <QPainterPath>
 #include <algorithm>
@@ -48,40 +51,51 @@ void AnalogSignalTrace::paintMid(QPainter &p, const QRect &rect,
         return double(rect.bottom()) - t * rect.height();
     };
 
-    p.setPen(QPen(color_, 1));
+    // Cosmetic (width-0) pen — see LogicSignalTrace for the full rationale:
+    // under a non-integer devicePixelRatio the painter carries a scale
+    // transform, and a non-cosmetic width-1 pen is then stroked into a
+    // device-space polygon whose fill goes quadratic on dense traces. A
+    // cosmetic pen stays 1 device pixel at any scale and is cheap.
+    QPen pen(color_);
+    pen.setCosmetic(true);
+    p.setPen(pen);
+
+    const bool prof = paintProfileEnabled();
+    QElapsedTimer timer;
+    if (prof) timer.start();
+
+    const char *mode = "persample";
+    qint64 segs = 0;
+
+    auto drawPerSample = [&] {
+        // One connected polyline, one drawPolyline call (batched).
+        QVector<QPointF> pts;
+        pts.reserve(int(last - first) + 1);
+        for (qint64 s = first; s <= last; ++s)
+            pts.append(QPointF(st.sampleToX(s, sr), yFor(seg->sampleAt(s))));
+        segs = pts.size();
+        p.drawPolyline(pts.constData(), int(pts.size()));
+    };
 
     if (samplesPerPixel < 1.0) {
-        // Per-sample polyline.
-        QPainterPath path;
-        for (qint64 s = first; s <= last; ++s) {
-            double x = st.sampleToX(s, sr);
-            double y = yFor(seg->sampleAt(s));
-            if (s == first) path.moveTo(x, y);
-            else path.lineTo(x, y);
-        }
-        p.drawPath(path);
+        drawPerSample();
     } else {
-        // Envelope: one vertical min/max bar per pixel column.
+        // Envelope: one vertical min/max bar per pixel column, plus min/max
+        // connectors to the previous column so flat runs stay a continuous
+        // line. All segments are accumulated and issued in a single
+        // drawLines call rather than ~3 drawLine calls per column.
         const auto &env = seg->envelope();
         int level = env.levelForSamplePerPixel(samplesPerPixel);
         if (level < 0) {
-            // Fall back to per-sample.
-            QPainterPath path;
-            for (qint64 s = first; s <= last; ++s) {
-                double x = st.sampleToX(s, sr);
-                double y = yFor(seg->sampleAt(s));
-                if (s == first) path.moveTo(x, y);
-                else path.lineTo(x, y);
-            }
-            p.drawPath(path);
+            drawPerSample();
         } else {
+            mode = "envelope";
             const auto &L = env.level(level);
             qint64 bucket = L.bucketSize;
             qint64 firstBucket = first / bucket;
             qint64 lastBucket = last / bucket + 1;   // one past the right edge.
-            // Draw each column's min..max bar AND connect it to the
-            // previous column's min/max, so flat runs (min≈max, otherwise
-            // isolated dots) stay a continuous line — every point linked.
+            QVector<QLineF> lines;
+            lines.reserve(int(lastBucket - firstBucket + 1) * 3);
             bool have = false;
             double px = 0, pMinY = 0, pMaxY = 0;
             for (qint64 b = firstBucket; b <= lastBucket; ++b) {
@@ -89,14 +103,28 @@ void AnalogSignalTrace::paintMid(QPainter &p, const QRect &rect,
                 double x = st.sampleToX(b * bucket, sr);
                 double yMin = yFor(L.minima[b] * seg->scale() + seg->offset());
                 double yMax = yFor(L.maxima[b] * seg->scale() + seg->offset());
-                p.drawLine(QPointF(x, yMin), QPointF(x, yMax));
+                lines.append(QLineF(x, yMin, x, yMax));
                 if (have) {
-                    p.drawLine(QPointF(px, pMaxY), QPointF(x, yMax));
-                    p.drawLine(QPointF(px, pMinY), QPointF(x, yMin));
+                    lines.append(QLineF(px, pMaxY, x, yMax));
+                    lines.append(QLineF(px, pMinY, x, yMin));
                 }
                 px = x; pMinY = yMin; pMaxY = yMax; have = true;
             }
+            segs = lines.size();
+            p.drawLines(lines.constData(), int(lines.size()));
         }
+    }
+
+    if (prof) {
+        qDebug().nospace()
+            << "[paint-prof] analog \"" << sig_->name() << "\""
+            << " mode=" << mode
+            << " segs=" << segs
+            << " span=" << (last - first + 1) << "smp"
+            << " spp=" << samplesPerPixel
+            << " draw=" << (timer.nsecsElapsed() / 1000) << "us"
+            << " rect=" << rect.width() << "x" << rect.height()
+            << " dpr=" << (p.device() ? p.device()->devicePixelRatioF() : 1.0);
     }
 }
 
