@@ -7,8 +7,6 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 # Let a running deploy finish rather than cancelling it half-published.
 concurrency:
@@ -17,25 +15,41 @@ concurrency:
 
 env:
   MDBOOK_VERSION: 0.5.4
+  TARGET_REPO: git@github.com:openmso/openmso.github.io.git
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+
       - name: Install mdbook
         run: |
           mkdir -p "$HOME/.local/bin"
           curl -fsSL "https://github.com/rust-lang/mdBook/releases/download/v$MDBOOK_VERSION/mdbook-v$MDBOOK_VERSION-x86_64-unknown-linux-gnu.tar.gz" \
             | tar -xz -C "$HOME/.local/bin"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
       - run: mdbook build doc
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: doc/book
-      - id: deployment
-        uses: actions/deploy-pages@v4
+
+      - name: Load deploy key
+        env:
+          DEPLOY_KEY: ${{ secrets.PAGES_DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Publish
+        run: |
+          cd doc/book
+          # The target repo holds only rendered output, so it gets a fresh
+          # one-commit history each deploy instead of accumulating build noise.
+          git init -q
+          git checkout -qb main
+          git add -A
+          git -c user.name="$GITHUB_ACTOR" \
+              -c user.email="$GITHUB_ACTOR@users.noreply.github.com" \
+              commit -qm "Deploy $GITHUB_SHA"
+          git push -qf "$TARGET_REPO" main
