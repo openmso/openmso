@@ -7,6 +7,9 @@ edition = "2021"
 license = "Apache-2.0"
 
 [workspace.dependencies]
+# OCP framing + CaptureServer/CaptureClient. Pinned by tag so a container or
+# CI build needs no sibling checkout; bump the tag here only.
+openmso = { git = "https://github.com/openmso/openmso-api.git", tag = "v0.1.0" }
 # preserve_order keeps config.set value maps in the order the client sent
 # them (application order matters, e.g. probe_factor before vdiv).
 serde_json = { version = "1", features = ["preserve_order"] }

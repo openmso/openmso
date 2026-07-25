@@ -147,6 +147,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 [[package]]
 name = "openmso"
 version = "0.1.0"
+source = "git+https://github.com/openmso/openmso-api.git?tag=v0.1.0#e091a52b0e47138a124cb791a3c2fa187a714937"
 dependencies = [
  "serde_json",
 ]

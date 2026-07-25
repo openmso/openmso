@@ -7,5 +7,5 @@ license.workspace = true
 
 [dependencies]
 nusb = "0.2.5"
-openmso = { path = "../../../openmso-api/rust/openmso" }
+openmso.workspace = true
 serde_json.workspace = true

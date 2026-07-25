@@ -4,21 +4,25 @@ Pluggable, open source front-end for mixed-signal / digital storage oscilloscope
 
 Capture runs in separate **plugin processes** that speak the [OpenMSO Capture Protocol](docs/protocol.md) (OCP) over stdio or TCP - similar to how LSP or DAP work - so that anyone can write a capture plugin for their hardware, without necessitating changes to this repo.
 
+The protocol itself and its reference bindings (framing, `CaptureServer`, `CaptureClient`) live in the sibling **[openmso-api](../openmso-api)** repo, which this repo depends on. The Python and Rust consumers here expect `openmso-api` to be checked out next to this repo.
+
 Note that this is currently a prototype / work in progress made with LLM assistance. See [LICENSES.md](LICENSES.md) for the licensing model (Apache-2.0 core, GPL only where sigrok code is reused).
 
 ## Layout
 
 ```
-docs/protocol.md      OCP wire protocol specification
-python/openmso/       Python reference implementation (framing, RPC, srzip
-                      writer, SCPI-over-TCP/USBTMC/VXI-11 transports)
-rust/openmso-plugin/  Rust plugin-side library (framing, serve loop, SCPI
-                      transports incl. a dependency-free VXI-11 client)
-rust/sds1000xe/       Siglent SDS1000X-E capture plugin (native binary)
-plugins/sds1000xe/    plugin manifest, udev rule, hardware notes
+docs/protocol.md      pointer to the OCP spec (now in the openmso-api repo)
+python/               srzip .sr writer, SCPI-over-TCP/USBTMC/VXI-11 transports,
+                      and plugin_manifest (capture-plugin resolution)
+rust/openmso-scpi/    SCPI transports (raw TCP, dependency-free VXI-11, usbtmc)
+rust/siglent-sds1000xe/  Siglent SDS1000X-E capture plugin (native binary)
+rust/generic-fx2/     Cypress FX2 (fx2lafw) logic-analyzer capture plugin
+plugins/siglent-sds1000xe/  plugin manifest, udev rule, hardware notes
 plugins/demo/         simulated mixed-signal device (no hardware needed)
 cli/omso              command-line frontend
 tests/                unit tests (Rust ones live next to the code: cargo test)
+
+(framing + CaptureServer/CaptureClient come from the openmso-api repo)
 ```
 
 ## Quick start
@@ -36,7 +40,7 @@ pulseview demo.sr
 ./cli/omso --plugin sds1000xe --address 192.168.1.155 capture \
     --channels C1,C3 --mode single -o capture.sr
 
-# Over USB (install plugins/sds1000xe/99-openmso-usbtmc.rules first):
+# Over USB (install plugins/siglent-sds1000xe/99-openmso-usbtmc.rules first):
 ./cli/omso --plugin sds1000xe scan
 ```
 

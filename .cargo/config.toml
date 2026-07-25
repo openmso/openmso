@@ -1,0 +1,4 @@
+[env]
+# ensure we do not fail tests because of missing sigrok-firmware-fx2lafw.
+# alternative strategy will be introduced later.
+OPENMSO_FX2_FIRMWARE_SKIP_BENCH = "1"
