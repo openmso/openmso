@@ -94,22 +94,43 @@ void AnalogSignalTrace::paintMid(QPainter &p, const QRect &rect,
             qint64 bucket = L.bucketSize;
             qint64 firstBucket = first / bucket;
             qint64 lastBucket = last / bucket + 1;   // one past the right edge.
+            // The chosen level packs bucketSize <= samplesPerPixel, so up to
+            // several buckets share one horizontal pixel. Coalesce every
+            // bucket landing in the same integer x column into a single
+            // min/max bar (aggregate the column's extremes) — one vertical +
+            // two connectors per PIXEL rather than per bucket. Same band, far
+            // fewer segments.
             QVector<QLineF> lines;
-            lines.reserve(int(lastBucket - firstBucket + 1) * 3);
-            bool have = false;
+            lines.reserve(rect.width() * 3 + 6);
+            bool have = false;                 // an emitted previous column
             double px = 0, pMinY = 0, pMaxY = 0;
-            for (qint64 b = firstBucket; b <= lastBucket; ++b) {
-                if (b < 0 || b >= L.minima.size()) continue;
-                double x = st.sampleToX(b * bucket, sr);
-                double yMin = yFor(L.minima[b] * seg->scale() + seg->offset());
-                double yMax = yFor(L.maxima[b] * seg->scale() + seg->offset());
-                lines.append(QLineF(x, yMin, x, yMax));
-                if (have) {
+            bool curValid = false;             // accumulating a column
+            int curCol = 0;
+            double colMinY = 0, colMaxY = 0;   // aggregate y extent this column
+            auto emitCol = [&](double x, double yMin, double yMax) {
+                lines.append(QLineF(x, yMin, x, yMax));       // min..max bar
+                if (have) {                                   // keep band continuous
                     lines.append(QLineF(px, pMaxY, x, yMax));
                     lines.append(QLineF(px, pMinY, x, yMin));
                 }
                 px = x; pMinY = yMin; pMaxY = yMax; have = true;
+            };
+            for (qint64 b = firstBucket; b <= lastBucket; ++b) {
+                if (b < 0 || b >= L.minima.size()) continue;
+                double x = st.sampleToX(b * bucket, sr);
+                int col = int(std::floor(x));
+                double yMin = yFor(L.minima[b] * seg->scale() + seg->offset());
+                double yMax = yFor(L.maxima[b] * seg->scale() + seg->offset());
+                if (!curValid || col != curCol) {
+                    if (curValid) emitCol(double(curCol), colMinY, colMaxY);
+                    curCol = col; colMinY = yMin; colMaxY = yMax; curValid = true;
+                } else {
+                    // yMin is the visually-lower point (larger y), yMax upper.
+                    colMinY = std::max(colMinY, yMin);
+                    colMaxY = std::min(colMaxY, yMax);
+                }
             }
+            if (curValid) emitCol(double(curCol), colMinY, colMaxY);
             segs = lines.size();
             p.drawLines(lines.constData(), int(lines.size()));
         }
