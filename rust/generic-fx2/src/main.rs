@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use serde_json::{json, Map, Value};
 
-use openmso_plugin::server::{self, Ctx, Plugin, RpcError, BUSY, DEVICE_ERROR,
+use openmso::server::{self, Ctx, CaptureServer, RpcError, BUSY, DEVICE_ERROR,
                               INVALID_PARAMS, UNSUPPORTED};
 
 use fx2::{Fx2, ReadResult, SAMPLE_RATES, DEFAULT_LIMIT_SAMPLES, DEFAULT_SAMPLERATE};
@@ -256,7 +256,7 @@ impl Fx2Plugin {
 }
 
 fn snap_samplerate(r: u32) -> u32 {
-    // Snap to the nearest legal ladder value (matches sds1000xe coercion).
+    // Snap to the nearest legal ladder value (matches siglent-sds1000xe coercion).
     SAMPLE_RATES.iter().copied()
         .min_by_key(|s| (*s as i64 - r as i64).abs())
         .unwrap_or(DEFAULT_SAMPLERATE)
@@ -369,9 +369,9 @@ fn acquire_inner(dev: &Dev, stop: &AtomicBool, ctx: &Ctx, cid: u64, mode: &str,
     Ok(())
 }
 
-impl Plugin for Fx2Plugin {
+impl CaptureServer for Fx2Plugin {
     fn info(&self) -> Value {
-        json!({"name": "fx2lafw", "version": "0.1.0", "vendor": "OpenMSO",
+        json!({"name": "generic-fx2", "version": "0.1.0", "vendor": "OpenMSO",
                "description": "Cypress FX2 (fx2lafw) logic analyzers"})
     }
 

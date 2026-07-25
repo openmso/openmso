@@ -47,11 +47,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2cd50c473c80f6d7c3670a752354b8e569b1a7cbfdc0419ec88e5edad85e0dc7"
 
 [[package]]
-name = "fx2lafw"
+name = "generic-fx2"
 version = "0.1.0"
 dependencies = [
  "nusb",
- "openmso-plugin",
+ "openmso",
  "serde_json",
 ]
 
@@ -145,10 +145,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
-name = "openmso-plugin"
+name = "openmso"
 version = "0.1.0"
 dependencies = [
- "libc",
  "serde_json",
 ]
 
@@ -181,14 +180,6 @@ dependencies = [
  "libc",
  "linux-raw-sys",
  "windows-sys",
-]
-
-[[package]]
-name = "sds1000xe"
-version = "0.2.0"
-dependencies = [
- "openmso-plugin",
- "serde_json",
 ]
 
 [[package]]
@@ -232,6 +223,15 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
+]
+
+[[package]]
+name = "siglent-sds1000xe"
+version = "0.2.0"
+dependencies = [
+ "libc",
+ "openmso",
+ "serde_json",
 ]
 
 [[package]]

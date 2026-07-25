@@ -22,16 +22,20 @@ import time
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_ROOT, "python"))
+# The OCP protocol library (framing / CaptureClient) lives in the sibling
+# openmso-api repo; the transports and .sr writer stay here in python/.
+sys.path.insert(0, os.path.join(REPO_ROOT, "..", "openmso-api", "python"))
 
 import numpy as np
 
-from openmso.client import PluginClient, PluginError, find_plugin
-from openmso.srzip import SrZipWriter
+from openmso.client import CaptureClient, CaptureError
+from plugin_manifest import find_plugin
+from srzip import SrZipWriter
 
 
 def launch(args, handler=None):
     argv, _manifest = find_plugin(args.plugin, REPO_ROOT)
-    client = PluginClient.launch(argv, notification_handler=handler)
+    client = CaptureClient.launch(argv, notification_handler=handler)
     client.initialize("omso")
     return client
 
@@ -287,7 +291,7 @@ def main():
     try:
         {"scan": cmd_scan, "info": cmd_info,
          "raw": cmd_raw, "capture": cmd_capture}[args.command](args)
-    except PluginError as e:
+    except CaptureError as e:
         sys.exit(f"omso: plugin error: {e}")
     except KeyboardInterrupt:
         sys.exit(130)

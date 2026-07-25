@@ -14,17 +14,18 @@ import sys
 import threading
 
 sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", "..", "python"))
+    os.path.dirname(os.path.abspath(__file__)),
+    "..", "..", "..", "openmso-api", "python"))
 
 import numpy as np
 
-from openmso.server import PluginServer, RpcError, INVALID_PARAMS, BUSY
+from openmso.server import CaptureServer, RpcError, INVALID_PARAMS, BUSY
 
 DEFAULTS = {"samplerate": 1_000_000, "sample_count": 100_000,
             "frequency": 1000.0, "amplitude": 1.0, "noise": 0.02}
 
 
-class DemoPlugin(PluginServer):
+class DemoPlugin(CaptureServer):
     info = {"name": "demo", "version": "0.1.0", "vendor": "OpenMSO",
             "description": "Simulated mixed-signal device"}
     capabilities = {"scan": True, "modes": ["single"], "raw": False,

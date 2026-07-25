@@ -1,6 +1,6 @@
 # Grant plugdev group access to fx2lafw-compatible Cypress FX2 logic
 # analyzers (Saleae Logic clone and siblings). Needed for non-root USB claim
 # + Cypress 0xA0 firmware upload.
-# Install: sudo cp 99-openmso-fx2lafw.rules /etc/udev/rules.d/ && sudo udevadm control --reload && sudo udevadm trigger
+# Install: sudo cp 99-openmso-generic-fx2.rules /etc/udev/rules.d/ && sudo udevadm control --reload && sudo udevadm trigger
 # Re-plug or `udevadm trigger /dev/bus/usb/...` after install.
 SUBSYSTEM=="usb", ATTRS{idVendor}=="0925", ATTRS{idProduct}=="3881", MODE="0660", GROUP="plugdev"

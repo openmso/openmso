@@ -1,7 +1,7 @@
 {
-    "name": "fx2lafw",
+    "name": "generic-fx2",
     "description": "Cypress FX2 (fx2lafw) logic analyzers (Saleae Logic clone and siblings)",
-    "run": ["../../rust/target/release/fx2lafw"],
+    "run": ["../../rust/target/release/generic-fx2"],
     "build": "cargo build --release   (run in rust/)",
     "license": "Apache-2.0"
 }

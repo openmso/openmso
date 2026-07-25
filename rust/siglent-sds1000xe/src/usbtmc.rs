@@ -3,11 +3,11 @@
 //!
 //! The kernel usbtmc driver handles USB-TMC framing; reads return message
 //! chunks (a reply may span several reads). Requires read/write access to
-//! the device node (udev rule, see plugins/sds1000xe/99-openmso-usbtmc.rules).
+//! the device node (udev rule, see plugins/siglent-sds1000xe/99-openmso-usbtmc.rules).
 //!
 //! On the SDS1000X-E (USB full speed) the kernel driver truncates replies
 //! longer than 52 bytes and the undrained remainder wedges the interface —
-//! see plugins/sds1000xe/NOTES.md. Short control queries work; this
+//! see plugins/siglent-sds1000xe/NOTES.md. Short control queries work; this
 //! transport self-heals a wedged interface once per session via
 //! USBDEVFS_RESET, exactly like the Python implementation.
 

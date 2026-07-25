@@ -1,5 +1,5 @@
 [package]
-name = "fx2lafw"
+name = "generic-fx2"
 version = "0.1.0"
 description = "OpenMSO capture plugin for Cypress FX2 (fx2lafw) logic analyzers"
 edition.workspace = true
@@ -7,5 +7,5 @@ license.workspace = true
 
 [dependencies]
 nusb = "0.2.5"
-openmso-plugin = { path = "../openmso-plugin" }
+openmso = { path = "../../../openmso-api/rust/openmso" }
 serde_json.workspace = true

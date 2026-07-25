@@ -18,8 +18,15 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Map, Value};
 
-use openmso_plugin::scpi::{fmt_scpi, open_transport, scpi_float, Scpi};
-use openmso_plugin::server::{self, Ctx, Plugin, RpcError, BUSY, DEVICE_ERROR,
+// Device-side SCPI transports (raw TCP, VXI-11, Linux usbtmc). Only this plugin
+// uses them, so they live here rather than in a shared crate.
+mod scpi;
+mod vxi11;
+#[cfg(target_os = "linux")]
+mod usbtmc;
+
+use crate::scpi::{fmt_scpi, open_transport, scpi_float, Scpi};
+use openmso::server::{self, Ctx, CaptureServer, RpcError, BUSY, DEVICE_ERROR,
                              INVALID_PARAMS, UNSUPPORTED};
 
 const VDIVS: [f64; 14] = [500e-6, 1e-3, 2e-3, 5e-3, 10e-3, 20e-3, 50e-3,
@@ -66,7 +73,7 @@ type Dev = Arc<Mutex<Option<Box<dyn Scpi>>>>;
 
 /// Run one or more SCPI transactions under the device lock (serializes
 /// access between the serve loop and the acquisition worker).
-fn with_dev<T>(dev: &Dev, f: impl FnOnce(&mut dyn Scpi) -> openmso_plugin::scpi::Result<T>)
+fn with_dev<T>(dev: &Dev, f: impl FnOnce(&mut dyn Scpi) -> crate::scpi::Result<T>)
                -> Result<T, String> {
     let mut guard = dev.lock().unwrap();
     match guard.as_mut() {
@@ -170,7 +177,7 @@ impl SdsPlugin {
                 Err(e) if e.0.contains("ermission denied") => {
                     ctx.log("warning", &format!(
                         "{path}: no permission (install udev rule, see \
-                         plugins/sds1000xe/99-openmso-usbtmc.rules)"));
+                         plugins/siglent-sds1000xe/99-openmso-usbtmc.rules)"));
                 }
                 Err(e) => ctx.log("warning", &format!("scan {path}: {e}")),
             }
@@ -188,7 +195,7 @@ impl SdsPlugin {
             let mut dev = open_transport(connection)?;
             let idn = dev.query("*IDN?")?;
             dev.command("CHDR OFF")?; // numeric-only replies from here on
-            Ok::<_, openmso_plugin::scpi::ScpiError>((dev, idn))
+            Ok::<_, crate::scpi::ScpiError>((dev, idn))
         })().map_err(|e| RpcError::new(DEVICE_ERROR, format!("open failed: {e}")))?;
         *self.dev.lock().unwrap() = Some(dev);
         let entry = device_entry(connection, &idn);
@@ -638,9 +645,9 @@ fn read_channel(dev: &Dev, stop: &AtomicBool, ctx: &Ctx, cid: u64, stream: usize
     Ok(())
 }
 
-impl Plugin for SdsPlugin {
+impl CaptureServer for SdsPlugin {
     fn info(&self) -> Value {
-        json!({"name": "sds1000xe", "version": "0.2.0", "vendor": "OpenMSO",
+        json!({"name": "siglent-sds1000xe", "version": "0.2.0", "vendor": "OpenMSO",
                "description": "Siglent SDS1000X-E series oscilloscopes"})
     }
 

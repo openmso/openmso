@@ -21,10 +21,11 @@ import termios
 import threading
 
 sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", "..", "python"))
+    os.path.dirname(os.path.abspath(__file__)),
+    "..", "..", "..", "openmso-api", "python"))
 
 from openmso.framing import MessageStream, ProtocolError
-from openmso.server import (PluginServer, RpcError, INVALID_PARAMS,
+from openmso.server import (CaptureServer, RpcError, INVALID_PARAMS,
                             DEVICE_ERROR, DEVICE_DISCONNECTED)
 
 METHOD_NOT_FOUND = -32601
@@ -149,7 +150,7 @@ class DeviceLink:
             pass
 
 
-class PicoPlugin(PluginServer):
+class PicoPlugin(CaptureServer):
     info = {"name": "pico", "version": "0.1.0", "vendor": "OpenMSO",
             "description": "Raspberry Pi Pico family mixed-signal device"}
     capabilities = {"scan": True, "modes": ["single", "snapshot", "continuous"],
