@@ -1,35 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Resolve a capture plugin name to its launch argv via
+//! Resolve a plugin name to the argv that launches it, via
 //! `plugins/<name>/plugin.json`.
 
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
+use openmso::manifest;
+use openmso::proto::PluginManifest;
 
 #[derive(Debug)]
-pub struct Manifest {
+pub struct Plugin {
+    pub manifest: PluginManifest,
     pub argv: Vec<String>,
 }
 
-fn default_python() -> String {
+fn python() -> String {
     std::env::var("OPENMSO_PYTHON").unwrap_or_else(|_| "python3".to_string())
-}
-
-/// Relative path entries (anything with a separator, or a `*.py` script)
-/// resolve against the plugin directory; plain flags pass through.
-fn resolve_arg(token: &str, plugin_dir: &Path) -> String {
-    if token == "{python}" {
-        return default_python();
-    }
-    let looks_like_path = token.contains('/') || token.ends_with(".py");
-    if !looks_like_path {
-        return token.to_string();
-    }
-    let p = Path::new(token);
-    if p.is_absolute() {
-        return token.to_string();
-    }
-    plugin_dir.join(p).to_string_lossy().into_owned()
 }
 
 /// Locate the plugins directory: explicit flag, then `$OPENMSO_PLUGINS_DIR`,
@@ -56,34 +41,35 @@ pub fn plugins_dir(explicit: Option<PathBuf>) -> Result<PathBuf, String> {
                  set OPENMSO_PLUGINS_DIR or pass --plugins-dir", dir.display()))
 }
 
-pub fn find_plugin(plugins_dir: &Path, name: &str) -> Result<Manifest, String> {
+pub fn find_plugin(plugins_dir: &Path, name: &str) -> Result<Plugin, String> {
     let plugin_dir = plugins_dir.join(name);
-    let manifest_path = plugin_dir.join("plugin.json");
-    let text = std::fs::read_to_string(&manifest_path).map_err(|e| {
-        format!("cannot read {}: {e}", manifest_path.display())
-    })?;
-    let manifest: Value = serde_json::from_str(&text)
-        .map_err(|e| format!("bad JSON in {}: {e}", manifest_path.display()))?;
+    let manifest = manifest::load(&plugin_dir)
+        .map_err(|e| format!("{}: {e}", plugin_dir.join(manifest::FILENAME).display()))?;
 
-    let run = manifest.get("run").and_then(Value::as_array).ok_or_else(|| {
-        format!("{} has no \"run\" array", manifest_path.display())
-    })?;
-    let argv: Vec<String> = run
-        .iter()
-        .filter_map(Value::as_str)
-        .map(|t| resolve_arg(t, &plugin_dir))
-        .collect();
-    if argv.is_empty() {
-        return Err(format!("{} has an empty \"run\" array", manifest_path.display()));
+    let argv = manifest::resolve_argv(&manifest, &plugin_dir, &python());
+    let program = argv.first().ok_or_else(|| format!("plugin {name:?} has an empty run list"))?;
+    if program.contains('/') && !Path::new(program).exists() {
+        let hint = match manifest.build.as_str() {
+            "" => String::new(),
+            build => format!(" — build it with: {build}"),
+        };
+        return Err(format!("plugin {name:?} executable missing: {program}{hint}"));
     }
+    Ok(Plugin { manifest, argv })
+}
 
-    if argv[0].contains('/') && !Path::new(&argv[0]).exists() {
-        let hint = manifest.get("build").and_then(Value::as_str)
-            .map(|b| format!(" — build it with: {b}"))
-            .unwrap_or_default();
-        return Err(format!("plugin {name:?} executable missing: {}{hint}", argv[0]));
+/// The manifest claims which `--device` URLs the plugin handles, so a typo is
+/// worth catching before a process is spawned to reject it.
+pub fn check_scheme(manifest: &PluginManifest, device: &str) -> Result<(), String> {
+    if manifest.url_schemes.is_empty() {
+        return Ok(());
     }
-    Ok(Manifest { argv })
+    let scheme = device.split("://").next().unwrap_or_default();
+    if manifest.url_schemes.iter().any(|s| s == scheme) {
+        return Ok(());
+    }
+    Err(format!("plugin {:?} handles {:?} URLs, not {scheme:?}",
+                manifest.name, manifest.url_schemes))
 }
 
 #[cfg(test)]
@@ -110,8 +96,8 @@ mod tests {
         // The executable must exist, or resolution reports it missing.
         std::fs::write(root.join("demo/demo"), b"#!/bin/true\n").unwrap();
 
-        let m = find_plugin(&root, "demo").unwrap();
-        assert_eq!(m.argv, vec![root.join("demo/./demo").to_string_lossy()]);
+        let p = find_plugin(&root, "demo").unwrap();
+        assert_eq!(p.argv, vec![root.join("demo/./demo").to_string_lossy()]);
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -128,22 +114,25 @@ mod tests {
     }
 
     #[test]
-    fn bare_tokens_pass_through_as_path_lookups() {
-        // A token with no separator and no .py suffix is a flag or a $PATH
-        // lookup, never a file beside the manifest. This is exactly why an
-        // installed manifest must say "./demo" and not "demo".
-        let dir = Path::new("/plugins/demo");
-        assert_eq!(resolve_arg("--listen", dir), "--listen");
-        assert_eq!(resolve_arg("demo", dir), "demo");
-        assert_eq!(resolve_arg("./demo", dir), "/plugins/demo/./demo");
-        assert_eq!(resolve_arg("plugin.py", dir), "/plugins/demo/plugin.py");
-        assert_eq!(resolve_arg("/usr/bin/thing", dir), "/usr/bin/thing");
+    fn a_manifest_that_is_not_a_manifest_says_so() {
+        let root = scratch("bad");
+        write_plugin(&root, "demo", r#"{"name":"demo","runn":["./demo"]}"#);
+        let err = find_plugin(&root, "demo").unwrap_err();
+        assert!(err.contains("plugin.json"), "{err}");
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
-    fn python_token_expands_to_the_interpreter() {
-        std::env::set_var("OPENMSO_PYTHON", "/usr/bin/python3.13");
-        assert_eq!(resolve_arg("{python}", Path::new("/x")), "/usr/bin/python3.13");
-        std::env::remove_var("OPENMSO_PYTHON");
+    fn device_urls_are_matched_against_the_declared_schemes() {
+        let manifest = PluginManifest {
+            name: "demo".into(),
+            url_schemes: vec!["demo".into()],
+            ..Default::default()
+        };
+        assert!(check_scheme(&manifest, "demo://0").is_ok());
+        let err = check_scheme(&manifest, "usb://04b4:8613").unwrap_err();
+        assert!(err.contains("usb"), "{err}");
+        // A manifest that claims nothing is not second-guessed.
+        assert!(check_scheme(&PluginManifest::default(), "usb://x").is_ok());
     }
 }

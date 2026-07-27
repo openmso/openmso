@@ -1,33 +1,31 @@
 // SPDX-License-Identifier: Apache-2.0
-//! omso-cli — OpenMSO command-line frontend.
+//! omso-cli — OpenMSO command-line frontend, and the reference OCP v1 client.
 //!
-//! Launches a capture plugin as a subprocess, speaks OCP to it over stdio, and
-//! writes captures as sigrok-compatible .sr files (plus optional CSV).
+//! Launches a capture plugin as a subprocess, speaks OCP over the two nng
+//! sockets it created for it, and writes captures as sigrok-compatible .sr
+//! files (plus optional CSV).
 //!
 //! Examples:
-//!   omso-cli --plugin demo capture -o demo.sr --csv demo.csv
-//!   omso-cli --plugin siglent-sds1000xe --address 192.168.1.155 scan
-//!   omso-cli --plugin siglent-sds1000xe --address 192.168.1.155 capture \
-//!            --channels C1,C3 --mode single -o cal.sr
-//!   omso-cli --plugin siglent-sds1000xe --address 192.168.1.155 raw "SARA?"
+//!   omso-cli --plugin demo --device demo://0 capture -o demo.sr --csv demo.csv
+//!   omso-cli --plugin demo --device demo://0 info
+//!   omso-cli --plugin siglent-sds1000xe --device tcp://192.168.1.155:5025 \
+//!            capture --channels C1,C3 --set C1@full_scale=8 -o cal.sr
 
+mod capture;
+mod config;
 mod manifest;
-mod sink;
 mod srzip;
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use openmso::client::CaptureClient;
-use serde_json::{json, Value};
+use openmso::proto::{AcquireMode, ChannelKind, Config, Description};
 
-use sink::Sink;
+use capture::Capture;
 use srzip::SrZipWriter;
-
-const RPC_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Parser)]
 #[command(name = "omso-cli", version, about = "OpenMSO command-line frontend")]
@@ -36,13 +34,9 @@ struct Cli {
     #[arg(long, global = true, default_value = "demo")]
     plugin: String,
 
-    /// Network address hint for scan
-    #[arg(long, global = true)]
-    address: Option<String>,
-
-    /// Substring to select among scan results
-    #[arg(long, global = true)]
-    device: Option<String>,
+    /// Device URL, e.g. demo://0, usb://04b4:8613, tcp://192.168.1.155:5025
+    #[arg(long, global = true, default_value = "demo://0")]
+    device: String,
 
     /// Directory holding plugin manifests (overrides $OPENMSO_PLUGINS_DIR)
     #[arg(long, global = true, value_name = "DIR")]
@@ -54,15 +48,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// List devices
-    Scan,
-    /// Show device description and config
+    /// Show what the plugin found, and what it will accept
     Info,
-    /// Send raw device commands (debug)
-    Raw {
-        #[arg(required = true)]
-        commands: Vec<String>,
-    },
     /// Perform a capture
     Capture(CaptureArgs),
 }
@@ -73,16 +60,16 @@ struct CaptureArgs {
     #[arg(long)]
     channels: Option<String>,
 
-    #[arg(long, default_value = "single", value_parser = ["single", "snapshot"])]
+    #[arg(long, default_value = "single", value_parser = ["single", "snapshot", "continuous"])]
     mode: String,
 
-    /// Trigger wait timeout, seconds
-    #[arg(long, default_value_t = 30.0)]
-    timeout: f64,
-
-    /// Config to apply, e.g. C1@vdiv=0.5 or memory_depth=14M (repeatable)
-    #[arg(long, value_name = "[CH@]KEY=VALUE")]
+    /// Config to apply, e.g. C1@full_scale=8 or sample_depth=14M (repeatable)
+    #[arg(long, value_name = "[CHANNEL@]KEY=VALUE")]
     set: Vec<String>,
+
+    /// Plugin-specific option from `info` (repeatable)
+    #[arg(long, value_name = "KEY=VALUE")]
+    vendor: Vec<String>,
 
     /// Write sigrok .sr file
     #[arg(short, long)]
@@ -113,223 +100,97 @@ fn main() -> ExitCode {
 
 fn run(cli: &Cli) -> Result<(), String> {
     let dir = manifest::plugins_dir(cli.plugins_dir.clone())?;
-    let m = manifest::find_plugin(&dir, &cli.plugin)?;
+    let plugin = manifest::find_plugin(&dir, &cli.plugin)?;
+    manifest::check_scheme(&plugin.manifest, &cli.device)?;
 
-    let verbose = !matches!(&cli.command, Command::Capture(a) if a.quiet);
-    let collector = Sink::new(verbose);
-    let handler = {
-        let collector = collector.clone();
-        Box::new(move |method: &str, params: &Value, payload: Option<&[u8]>| {
-            collector.handle(method, params, payload);
-        })
-    };
-
-    let mut client = CaptureClient::launch(&m.argv, Some(handler))
+    let mut client = CaptureClient::launch(&plugin.argv, &cli.device)
         .map_err(|e| format!("cannot launch plugin {:?}: {e}", cli.plugin))?;
-    client.initialize("omso-cli").map_err(|e| e.to_string())?;
+    let hello = client
+        .hello("omso-cli", env!("CARGO_PKG_VERSION"))
+        .map_err(|e| format!("handshake failed: {e}"))?;
 
     let result = match &cli.command {
-        Command::Scan => cmd_scan(&client, cli),
-        Command::Info => cmd_info(&client, cli),
-        Command::Raw { commands } => cmd_raw(&client, cli, commands),
-        Command::Capture(args) => cmd_capture(&client, cli, args, &collector),
+        Command::Info => cmd_info(&mut client, &hello),
+        Command::Capture(args) => cmd_capture(&mut client, args),
     };
-    client.close();
+    // A plugin that is already wedged should not stop us reporting why.
+    client.shutdown().ok();
     result
 }
 
-fn request(client: &CaptureClient, method: &str, params: Value) -> Result<Value, String> {
-    client.request(method, params, RPC_TIMEOUT)
-        .map_err(|e| format!("plugin error: {e}"))
+fn json<T: serde::Serialize>(value: &T) -> Result<String, String> {
+    serde_json::to_string_pretty(value).map_err(|e| e.to_string())
 }
 
-fn scan_hints(cli: &Cli) -> Value {
-    match &cli.address {
-        Some(a) => json!({"address": a}),
-        None => json!({}),
-    }
-}
-
-fn pick_device(client: &CaptureClient, cli: &Cli) -> Result<Value, String> {
-    let r = request(client, "scan", json!({"hints": scan_hints(cli)}))?;
-    let devices = r.get("devices").and_then(Value::as_array).cloned().unwrap_or_default();
-    if devices.is_empty() {
-        return Err("no devices found".to_string());
-    }
-    match &cli.device {
-        Some(want) => devices.into_iter()
-            .find(|d| d.get("device_id").and_then(Value::as_str)
-                       .is_some_and(|id| id.contains(want.as_str())))
-            .ok_or_else(|| format!("no device matching {want:?}")),
-        None => Ok(devices.into_iter().next().expect("non-empty")),
-    }
-}
-
-fn field<'a>(v: &'a Value, key: &str) -> &'a str {
-    v.get(key).and_then(Value::as_str).unwrap_or("?")
-}
-
-fn cmd_scan(client: &CaptureClient, cli: &Cli) -> Result<(), String> {
-    let r = request(client, "scan", json!({"hints": scan_hints(cli)}))?;
-    let devices = r.get("devices").and_then(Value::as_array).cloned().unwrap_or_default();
-    if devices.is_empty() {
-        println!("no devices found");
-    }
-    for d in &devices {
-        println!("{}: {} {} (serial {})", field(d, "device_id"), field(d, "vendor"),
-                 field(d, "model"), field(d, "serial"));
-    }
+fn cmd_info(client: &mut CaptureClient, hello: &openmso::proto::HelloResult) -> Result<(), String> {
+    println!("{}", json(hello)?);
+    println!("{}", json(&client.describe().map_err(|e| e.to_string())?)?);
+    println!("{}", json(&client.get_config().map_err(|e| e.to_string())?)?);
     Ok(())
 }
 
-fn cmd_info(client: &CaptureClient, cli: &Cli) -> Result<(), String> {
-    let dev = pick_device(client, cli)?;
-    request(client, "open", json!({"device_id": dev.get("device_id")}))?;
-    let desc = request(client, "describe", json!({}))?;
-    println!("{}", serde_json::to_string_pretty(&desc).map_err(|e| e.to_string())?);
-
-    let cfg = request(client, "config.get", json!({}))?;
-    println!("\n# device config:");
-    println!("{}", serde_json::to_string_pretty(cfg.get("values").unwrap_or(&json!({})))
-             .map_err(|e| e.to_string())?);
-
-    for ch in analog_channels(&desc) {
-        let vals = request(client, "config.get", json!({"channel": ch}))?;
-        println!("# {ch}: {}", vals.get("values").unwrap_or(&json!({})));
-    }
-    Ok(())
+fn channels_of(description: &Description, kind: ChannelKind) -> Vec<String> {
+    description
+        .channels
+        .iter()
+        .filter(|c| c.kind == kind as i32)
+        .map(|c| c.id.clone())
+        .collect()
 }
 
-fn cmd_raw(client: &CaptureClient, cli: &Cli, commands: &[String]) -> Result<(), String> {
-    let dev = pick_device(client, cli)?;
-    request(client, "open", json!({"device_id": dev.get("device_id")}))?;
-    for cmd in commands {
-        let r = request(client, "device.raw", json!({"command": cmd}))?;
-        if let Some(resp) = r.get("response").and_then(Value::as_str) {
-            println!("{resp}");
-        }
-    }
-    Ok(())
-}
+fn cmd_capture(client: &mut CaptureClient, args: &CaptureArgs) -> Result<(), String> {
+    let description = client.describe().map_err(|e| e.to_string())?;
 
-fn analog_channels(desc: &Value) -> Vec<String> {
-    desc.get("channels").and_then(Value::as_array).map(|chs| {
-        chs.iter()
-            .filter(|c| c.get("kind").and_then(Value::as_str) == Some("analog"))
-            .filter_map(|c| c.get("id").and_then(Value::as_str).map(String::from))
-            .collect()
-    }).unwrap_or_default()
-}
-
-fn cmd_capture(client: &CaptureClient, cli: &Cli, args: &CaptureArgs,
-               collector: &Sink) -> Result<(), String> {
-    let dev = pick_device(client, cli)?;
-    request(client, "open", json!({"device_id": dev.get("device_id")}))?;
-    if !args.quiet {
-        eprintln!("opened {} {} via {}", field(&dev, "vendor"), field(&dev, "model"),
-                  field(&dev, "connection"));
-    }
-
-    let desc = request(client, "describe", json!({}))?;
-    let analog = analog_channels(&desc);
+    let mut config = Config::default();
     if let Some(list) = &args.channels {
         let wanted: Vec<&str> = list.split(',').collect();
-        let unknown: Vec<&&str> = wanted.iter()
-            .filter(|c| !analog.iter().any(|a| a == *c)).collect();
-        if !unknown.is_empty() {
-            return Err(format!("unknown channels: {unknown:?} (device has {analog:?})"));
-        }
-        for ch in &analog {
-            request(client, "config.set",
-                    json!({"channel": ch,
-                           "values": {"enabled": wanted.contains(&ch.as_str())}}))?;
-        }
+        config::select_channels(&mut config, &wanted,
+                                &channels_of(&description, ChannelKind::ChannelAnalog))?;
     }
-
     for spec in &args.set {
-        let (scope, kv) = match spec.rfind('@') {
-            Some(i) => (Some(&spec[..i]), &spec[i + 1..]),
-            None => (None, spec.as_str()),
-        };
-        let (key, raw) = kv.split_once('=')
-            .ok_or_else(|| format!("--set {spec:?} is not [CH@]KEY=VALUE"))?;
-        // Bare words stay strings; anything JSON-shaped keeps its type.
-        let value: Value = serde_json::from_str(raw)
-            .unwrap_or_else(|_| Value::String(raw.to_string()));
-        let mut params = json!({"values": {key: value}});
-        if let Some(ch) = scope.filter(|s| !s.is_empty()) {
-            params["channel"] = json!(ch);
-        }
-        let applied = request(client, "config.set", params)?;
+        config::apply_spec(&mut config, spec)?;
+    }
+    for spec in &args.vendor {
+        let (key, value) = spec
+            .split_once('=')
+            .ok_or_else(|| format!("--vendor {spec:?} is not KEY=VALUE"))?;
+        config.vendor.insert(key.to_string(), value.to_string());
+    }
+    if config != Config::default() {
+        let settled = client.set_config(config).map_err(|e| e.to_string())?;
         if !args.quiet {
-            eprintln!("set {spec} -> {}", applied.get("applied").unwrap_or(&json!({})));
+            eprintln!("configured: {}", json(&settled)?);
         }
     }
 
-    let r = request(client, "acquire.start",
-                    json!({"mode": args.mode, "timeout": args.timeout}))?;
+    let mode = match args.mode.as_str() {
+        "snapshot" => AcquireMode::AcquireSnapshot,
+        "continuous" => AcquireMode::AcquireContinuous,
+        _ => AcquireMode::AcquireSingle,
+    };
+    let capture_id = client.next_capture_id();
+    client.acquire_start(capture_id, mode).map_err(|e| e.to_string())?;
     if !args.quiet {
-        eprintln!("capture {} started ({})",
-                  r.get("capture_id").unwrap_or(&json!(null)), args.mode);
+        eprintln!("capture {capture_id} started ({})", args.mode);
     }
 
-    // Generous slack over the trigger timeout: the transfer itself can be slow.
-    if !collector.wait(Duration::from_secs_f64(args.timeout + 120.0)) {
-        return Err("capture timed out".to_string());
-    }
-    let state = collector.state();
-    let end = state.end.as_ref().expect("wait returned true");
-    if !end.get("ok").and_then(Value::as_bool).unwrap_or(false) {
-        return Err(format!("capture failed: {}", field(end, "error")));
-    }
-    write_outputs(&state, args)
+    let capture = capture::collect(client, capture_id, !args.quiet)?;
+    report(&capture);
+    write_outputs(&capture, args)
 }
 
-struct AnalogStream {
-    name: String,
-    volts: Vec<f64>,
-}
-
-fn write_outputs(state: &sink::State, args: &CaptureArgs) -> Result<(), String> {
-    let begin = state.begin.as_ref().ok_or("no capture.begin received")?;
-    let samplerate = begin.get("samplerate").and_then(Value::as_f64)
-        .ok_or("capture.begin has no samplerate")?;
-    let empty = vec![];
-    let streams = begin.get("streams").and_then(Value::as_array).unwrap_or(&empty);
-
-    let mut analog: Vec<AnalogStream> = Vec::new();
-    let mut logic_channels: Vec<String> = Vec::new();
-    let mut logic_blob: Vec<u8> = Vec::new();
-
-    for s in streams {
-        let id = s.get("stream").and_then(Value::as_i64).unwrap_or(0);
-        let channels: Vec<String> = s.get("channels").and_then(Value::as_array)
-            .map(|cs| cs.iter().filter_map(Value::as_str).map(String::from).collect())
-            .unwrap_or_default();
-        match s.get("kind").and_then(Value::as_str) {
-            Some("analog") => {
-                let enc = s.get("encoding").cloned().unwrap_or_else(|| json!({}));
-                let volts = sink::decode(
-                    &state.stream_bytes(id),
-                    enc.get("dtype").and_then(Value::as_str).unwrap_or("int8"),
-                    enc.get("scale").and_then(Value::as_f64).unwrap_or(1.0),
-                    enc.get("offset").and_then(Value::as_f64).unwrap_or(0.0))?;
-                let name = channels.first().cloned()
-                    .unwrap_or_else(|| format!("stream{id}"));
-                analog.push(AnalogStream { name, volts });
-            }
-            Some("logic") => {
-                logic_channels.extend(channels);
-                logic_blob.extend_from_slice(&state.stream_bytes(id));
-            }
-            _ => {}
-        }
+fn report(capture: &Capture) {
+    let samples = capture.analog.iter().map(|a| a.volts.len()).max().unwrap_or(0);
+    println!("capture: {} analog channel(s), {samples} samples @ {} Sa/s",
+             capture.analog.len(), fmt_rate(capture.samplerate));
+    if let Some(sample) = capture.trigger_sample {
+        let t = sample as f64 / capture.samplerate + capture.t0;
+        println!("  trigger at sample {sample} (t = {t:+.6} s)");
     }
-
-    let nsamples = analog.iter().map(|a| a.volts.len()).max().unwrap_or(0);
-    println!("capture: {} analog channel(s), {nsamples} samples @ {} Sa/s",
-             analog.len(), fmt_rate(samplerate));
-    for a in &analog {
+    if capture.dropped_samples > 0 {
+        println!("  warning: {} samples dropped by the device", capture.dropped_samples);
+    }
+    for a in &capture.analog {
         if a.volts.is_empty() {
             println!("  {}: no samples", a.name);
             continue;
@@ -340,22 +201,23 @@ fn write_outputs(state: &sink::State, args: &CaptureArgs) -> Result<(), String> 
         println!("  {}: min {min:+.4} V  max {max:+.4} V  mean {mean:+.4} V  \
                   pkpk {:.4} V", a.name, max - min);
     }
+}
 
+fn write_outputs(capture: &Capture, args: &CaptureArgs) -> Result<(), String> {
     if let Some(path) = &args.output {
-        let mut w = SrZipWriter::new(samplerate, logic_channels,
-                                     analog.iter().map(|a| a.name.clone()).collect());
-        for (i, a) in analog.iter().enumerate() {
+        let mut w = SrZipWriter::new(capture.samplerate, capture.logic_channels.clone(),
+                                     capture.analog.iter().map(|a| a.name.clone()).collect());
+        for (i, a) in capture.analog.iter().enumerate() {
             w.add_analog(i, &a.volts);
         }
-        w.add_logic(&logic_blob);
+        w.add_logic(&capture.logic);
         w.write(path).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
         println!("wrote {}", path.display());
     }
 
     if let Some(path) = &args.csv {
         let step = args.csv_decimate.max(1);
-        let t0 = begin.get("t0").and_then(Value::as_f64).unwrap_or(0.0);
-        write_csv(path, &analog, nsamples, samplerate, t0, step)
+        write_csv(path, capture, step)
             .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
         println!("wrote {}{}", path.display(),
                  if step > 1 { format!(" (1:{step} decimated)") } else { String::new() });
@@ -363,18 +225,17 @@ fn write_outputs(state: &sink::State, args: &CaptureArgs) -> Result<(), String> 
     Ok(())
 }
 
-fn write_csv(path: &PathBuf, analog: &[AnalogStream], nsamples: usize,
-             samplerate: f64, t0: f64, step: usize) -> std::io::Result<()> {
-    let f = std::fs::File::create(path)?;
-    let mut w = std::io::BufWriter::new(f);
+fn write_csv(path: &Path, capture: &Capture, step: usize) -> std::io::Result<()> {
+    let samples = capture.analog.iter().map(|a| a.volts.len()).max().unwrap_or(0);
+    let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
     write!(w, "time")?;
-    for a in analog {
+    for a in &capture.analog {
         write!(w, ",{}", a.name)?;
     }
     writeln!(w)?;
-    for i in (0..nsamples).step_by(step) {
-        write!(w, "{:.12e}", i as f64 / samplerate + t0)?;
-        for a in analog {
+    for i in (0..samples).step_by(step) {
+        write!(w, "{:.12e}", i as f64 / capture.samplerate + capture.t0)?;
+        for a in &capture.analog {
             match a.volts.get(i) {
                 Some(v) => write!(w, ",{v:.12e}")?,
                 None => write!(w, ",")?,
@@ -398,6 +259,7 @@ fn fmt_rate(sr: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openmso::proto::Channel;
 
     #[test]
     fn rates_print_without_exponent_notation() {
@@ -408,12 +270,22 @@ mod tests {
 
     #[test]
     fn analog_channel_ids_come_from_describe() {
-        let desc = json!({"channels": [
-            {"id": "A0", "kind": "analog"},
-            {"id": "D0", "kind": "logic"},
-            {"id": "A1", "kind": "analog"}]});
-        assert_eq!(analog_channels(&desc), vec!["A0", "A1"]);
-        assert!(analog_channels(&json!({})).is_empty());
+        let channel = |id: &str, kind: ChannelKind| Channel {
+            id: id.to_string(),
+            kind: kind as i32,
+            ..Default::default()
+        };
+        let description = Description {
+            channels: vec![
+                channel("A0", ChannelKind::ChannelAnalog),
+                channel("D0", ChannelKind::ChannelLogic),
+                channel("A1", ChannelKind::ChannelAnalog),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(channels_of(&description, ChannelKind::ChannelAnalog), ["A0", "A1"]);
+        assert_eq!(channels_of(&description, ChannelKind::ChannelLogic), ["D0"]);
+        assert!(channels_of(&Description::default(), ChannelKind::ChannelAnalog).is_empty());
     }
 
     #[test]
@@ -422,19 +294,21 @@ mod tests {
         Cli::command().debug_assert();
 
         let cli = Cli::try_parse_from(
-            ["omso-cli", "--plugin", "demo", "capture", "-o", "x.sr"]).unwrap();
+            ["omso-cli", "--plugin", "demo", "--device", "demo://0", "capture", "-o", "x.sr"])
+            .unwrap();
         assert_eq!(cli.plugin, "demo");
+        assert_eq!(cli.device, "demo://0");
         let Command::Capture(a) = &cli.command else { panic!("expected capture") };
-        assert_eq!(a.output.as_deref(), Some(std::path::Path::new("x.sr")));
+        assert_eq!(a.output.as_deref(), Some(Path::new("x.sr")));
         assert_eq!(a.mode, "single");
 
-        let cli = Cli::try_parse_from(
-            ["omso-cli", "scan", "--address", "192.168.1.155"]).unwrap();
-        assert_eq!(cli.address.as_deref(), Some("192.168.1.155"));
+        let cli = Cli::try_parse_from(["omso-cli", "info"]).unwrap();
+        assert_eq!(cli.plugin, "demo");
 
-        assert_eq!(Cli::try_parse_from(["omso-cli", "scan"]).unwrap().plugin, "demo");
-
-        assert!(Cli::try_parse_from(
-            ["omso-cli", "capture", "--mode", "continuous"]).is_err());
+        assert!(Cli::try_parse_from(["omso-cli", "capture", "--mode", "sometimes"]).is_err());
+        // scan and raw are gone: the frontend enumerates, and device-native
+        // command passthrough left the protocol.
+        assert!(Cli::try_parse_from(["omso-cli", "scan"]).is_err());
+        assert!(Cli::try_parse_from(["omso-cli", "raw", "SARA?"]).is_err());
     }
 }

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! OpenMSO demo/simulation plugin.
+//! OpenMSO demo/simulation plugin, and the reference OCP v1 plugin.
 //!
 //! Synthesizes a mixed-signal capture with no hardware: two analog channels
 //! (sine + square with noise) and eight logic channels (a binary counter on
@@ -7,67 +7,172 @@
 //! "OpenMSO! "). Useful for exercising frontends, the protocol, decoders and
 //! file writers.
 
+use std::collections::HashMap;
 use std::f64::consts::TAU;
+use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
-use openmso::server::{self, CaptureServer, Ctx, RpcError, BUSY, INVALID_PARAMS};
-use serde_json::{json, Map, Value};
+use openmso::encoding::accepts;
+use openmso::proto::{
+    event, stream, trigger, AcquireMode, AcquireStart, AcquireStop,
+    AcquisitionBegin, AcquisitionEnd, AnalogFormat, AnalogLimits, Capabilities, CaptureBegin,
+    CaptureEnd, CaptureTrigger, Channel, ChannelConfig, ChannelKind, Config, Coupling,
+    DeviceConfig, DeviceInfo, DeviceLimits, Description, DoubleSet, Empty, Hello, HelloResult,
+    LogicFormat, LogicLimits, PluginInfo, SampleEncoding, SampleType, State, Stream, TriggerKind,
+    UintRange, UintSet, VendorOption,
+};
+use openmso::server::{self, Args, CaptureServer, Events, StreamSender};
+use openmso::{proto, Reply};
 
 const UART_BAUD: f64 = 115200.0;
 const UART_TEXT: &[u8] = b"OpenMSO! ";
-/// Recommended max OCP payload is 4 MiB; 1 MiB keeps notifications small.
-const CHUNK: usize = 1 << 20;
 /// Fixed, so a demo capture is byte-identical from run to run.
 const NOISE_SEED: u64 = 0x0DE0_0DE0_0DE0_0DE0;
+/// Guards against a frontend asking for a capture that would not fit in RAM.
+const MAX_SAMPLE_DEPTH: u64 = 100_000_000;
+
+const ANALOG: [(&str, &str); 2] = [("A0", "sine"), ("A1", "square")];
+const LOGIC_CHANNELS: usize = 8;
 
 // --- config ---------------------------------------------------------------
 
 #[derive(Clone, Copy)]
 struct Cfg {
     samplerate: f64,
-    sample_count: i64,
+    sample_depth: u64,
     frequency: f64,
     amplitude: f64,
     noise: f64,
+    enabled: [bool; ANALOG.len()],
 }
 
 impl Default for Cfg {
     fn default() -> Self {
-        Cfg { samplerate: 1_000_000.0, sample_count: 100_000, frequency: 1000.0,
-              amplitude: 1.0, noise: 0.02 }
+        Cfg { samplerate: 1_000_000.0, sample_depth: 100_000, frequency: 1000.0,
+              amplitude: 1.0, noise: 0.02, enabled: [true; ANALOG.len()] }
     }
 }
 
 impl Cfg {
-    const KEYS: [&'static str; 5] =
-        ["samplerate", "sample_count", "frequency", "amplitude", "noise"];
+    /// Settings with no field of their own in `Config`. A frontend may show
+    /// these generically and must work correctly while ignoring them.
+    const VENDOR_KEYS: [(&'static str, &'static str); 3] = [
+        ("frequency", "signal frequency, Hz"),
+        ("amplitude", "signal amplitude, volts peak"),
+        ("noise", "gaussian noise added to each sample, volts RMS"),
+    ];
 
-    fn get(&self, key: &str) -> Option<Value> {
-        Some(match key {
-            "samplerate" => json!(self.samplerate),
-            "sample_count" => json!(self.sample_count),
-            "frequency" => json!(self.frequency),
-            "amplitude" => json!(self.amplitude),
-            "noise" => json!(self.noise),
-            _ => return None,
-        })
-    }
-
-    fn set(&mut self, key: &str, v: &Value) -> Result<Value, RpcError> {
-        let n = v.as_f64().ok_or_else(|| {
-            RpcError::new(INVALID_PARAMS, format!("{key:?} must be a number"))
-        })?;
-        match key {
-            "samplerate" => self.samplerate = n,
-            "sample_count" => self.sample_count = n as i64,
-            "frequency" => self.frequency = n,
-            "amplitude" => self.amplitude = n,
-            "noise" => self.noise = n,
-            _ => return Err(RpcError::new(INVALID_PARAMS, format!("unknown key {key:?}"))),
+    fn to_config(self) -> Config {
+        let channels = ANALOG
+            .iter()
+            .zip(self.enabled)
+            .map(|((id, _), enabled)| ChannelConfig {
+                id: id.to_string(),
+                enabled: Some(enabled),
+                ..Default::default()
+            })
+            .chain((0..LOGIC_CHANNELS).map(|i| ChannelConfig {
+                id: format!("D{i}"),
+                enabled: Some(true),
+                ..Default::default()
+            }))
+            .collect();
+        let vendor = HashMap::from([
+            ("frequency".to_string(), self.frequency.to_string()),
+            ("amplitude".to_string(), self.amplitude.to_string()),
+            ("noise".to_string(), self.noise.to_string()),
+        ]);
+        Config {
+            device: Some(DeviceConfig {
+                samplerate: Some(self.samplerate),
+                sample_depth: Some(self.sample_depth),
+                trigger: Some(proto::Trigger {
+                    trigger: Some(trigger::Trigger::None(Empty {})),
+                    position: 0.0,
+                }),
+                averaging: Some(1),
+                capture_span: Some(self.sample_depth as f64 / self.samplerate),
+            }),
+            channels,
+            vendor,
         }
-        Ok(self.get(key).expect("key matched above"))
     }
+
+    /// Apply the fields present in `config`; the caller reports back what this
+    /// left the device on, which is not always what was asked for.
+    fn apply(&mut self, config: &Config) -> Reply<()> {
+        if let Some(device) = &config.device {
+            self.apply_device(device)?;
+        }
+        for channel in &config.channels {
+            self.apply_channel(channel)?;
+        }
+        for (key, value) in &config.vendor {
+            let slot = match key.as_str() {
+                "frequency" => &mut self.frequency,
+                "amplitude" => &mut self.amplitude,
+                "noise" => &mut self.noise,
+                _ => return Err(proto::Error::invalid(format!("no vendor option {key:?}"))),
+            };
+            *slot = value.parse().map_err(|_| {
+                proto::Error::invalid(format!("vendor option {key:?} is not a number: {value:?}"))
+            })?;
+        }
+        Ok(())
+    }
+
+    fn apply_device(&mut self, device: &DeviceConfig) -> Reply<()> {
+        if let Some(rate) = device.samplerate {
+            if !(rate.is_finite() && rate > 0.0) {
+                return Err(proto::Error::invalid("samplerate must be positive"));
+            }
+            self.samplerate = rate;
+        }
+        if let Some(depth) = device.sample_depth {
+            if depth == 0 || depth > MAX_SAMPLE_DEPTH {
+                return Err(proto::Error::invalid(format!(
+                    "sample_depth must be 1..{MAX_SAMPLE_DEPTH}"
+                )));
+            }
+            self.sample_depth = depth;
+        }
+        if let Some(trigger) = &device.trigger {
+            if !matches!(trigger.trigger, None | Some(trigger::Trigger::None(_))) {
+                return Err(proto::Error::unsupported("the demo device free-runs"));
+            }
+        }
+        match device.averaging {
+            None | Some(1) => Ok(()),
+            Some(_) => Err(proto::Error::unsupported("averaging")),
+        }
+    }
+
+    fn apply_channel(&mut self, channel: &ChannelConfig) -> Reply<()> {
+        // Logic channels are always on: they share one packed stream, and
+        // dropping one would renumber the bits underneath a decoder.
+        if let Some(index) = logic_index(&channel.id) {
+            if index < LOGIC_CHANNELS {
+                return Ok(());
+            }
+        }
+        let index = ANALOG
+            .iter()
+            .position(|(id, _)| *id == channel.id)
+            .ok_or_else(|| proto::Error::invalid(format!("no channel {:?}", channel.id)))?;
+        if let Some(enabled) = channel.enabled {
+            self.enabled[index] = enabled;
+        }
+        if channel.coupling.is_some_and(|c| c != Coupling::Dc as i32) {
+            return Err(proto::Error::unsupported("the demo device is DC coupled"));
+        }
+        Ok(())
+    }
+}
+
+fn logic_index(id: &str) -> Option<usize> {
+    id.strip_prefix('D').and_then(|n| n.parse().ok())
 }
 
 // --- deterministic noise --------------------------------------------------
@@ -138,14 +243,17 @@ struct Synth {
     sine: Vec<u8>,
     square: Vec<u8>,
     logic: Vec<u8>,
-    scale: f64,
+}
+
+/// Volts per code: int8 codes at 25 per "division", like an 8-bit scope.
+fn code_scale(cfg: &Cfg) -> f64 {
+    cfg.amplitude / 100.0
 }
 
 fn synthesize(cfg: &Cfg) -> Synth {
-    let n = cfg.sample_count.max(0) as usize;
+    let n = cfg.sample_depth as usize;
     let (sr, f, a) = (cfg.samplerate, cfg.frequency, cfg.amplitude);
-    // int8 codes at 25 codes per "division", like a real 8-bit scope.
-    let scale = a / 100.0;
+    let scale = code_scale(cfg);
 
     let mut rng = Rng::new(NOISE_SEED);
     let mut sine = Vec::with_capacity(n);
@@ -170,158 +278,320 @@ fn synthesize(cfg: &Cfg) -> Synth {
         logic.push((counter as u8 & 0x7F) | (bits[idx] << 7));
     }
 
-    Synth { sine, square, logic, scale }
+    Synth { sine, square, logic }
 }
 
 // --- plugin ---------------------------------------------------------------
 
 struct DemoPlugin {
-    open: bool,
+    device: String,
     cfg: Cfg,
-    capture_id: i64,
-    acq: Option<JoinHandle<()>>,
+    /// What the frontend agreed to decode, from the Hello negotiation.
+    encodings: Vec<i32>,
+    stop: Arc<AtomicBool>,
+    acquisition: Option<JoinHandle<()>>,
 }
 
 impl DemoPlugin {
-    fn new() -> Self {
-        DemoPlugin { open: false, cfg: Cfg::default(), capture_id: 0, acq: None }
+    fn new(device: String) -> Self {
+        DemoPlugin {
+            device,
+            cfg: Cfg::default(),
+            encodings: vec![SampleEncoding::Packed as i32],
+            stop: Arc::new(AtomicBool::new(false)),
+            acquisition: None,
+        }
     }
 
-    fn describe(&self) -> Value {
-        let mut channels = vec![
-            json!({"id": "A0", "kind": "analog", "name": "sine", "index": 0}),
-            json!({"id": "A1", "kind": "analog", "name": "square", "index": 1}),
-        ];
-        for i in 0..8 {
-            channels.push(json!({"id": format!("D{i}"), "kind": "logic",
-                                 "name": format!("D{i}"), "index": i}));
+    /// The streams a capture will carry, in the order their ids are assigned.
+    fn streams(&self, scale: f64) -> Vec<Stream> {
+        let mut streams: Vec<Stream> = ANALOG
+            .iter()
+            .zip(self.cfg.enabled)
+            .filter(|(_, enabled)| *enabled)
+            .map(|((id, _), _)| Stream {
+                channels: vec![id.to_string()],
+                format: Some(stream::Format::Analog(AnalogFormat {
+                    r#type: SampleType::SampleInt8 as i32,
+                    scale,
+                    offset: 0.0,
+                    unit: "V".to_string(),
+                    digits: 3,
+                })),
+                ..Default::default()
+            })
+            .collect();
+        streams.push(Stream {
+            channels: (0..LOGIC_CHANNELS).map(|i| format!("D{i}")).collect(),
+            format: Some(stream::Format::Logic(LogicFormat { unitsize: 1 })),
+            ..Default::default()
+        });
+        for (id, stream) in streams.iter_mut().enumerate() {
+            stream.id = id as u32;
         }
-        let mut config = Map::new();
-        for key in Cfg::KEYS {
-            config.insert(key.to_string(), json!({"scope": "device", "type": "number",
-                                                  "get": true, "set": true}));
-        }
-        json!({"device": {"vendor": "OpenMSO", "model": "Demo MSO"},
-               "channels": channels, "config": config})
+        streams
     }
 
-    fn config_get(&self, params: &Value) -> Result<Value, RpcError> {
-        let mut values = Map::new();
-        match params.get("keys").and_then(Value::as_array) {
-            Some(keys) => {
-                for k in keys.iter().filter_map(Value::as_str) {
-                    if let Some(v) = self.cfg.get(k) {
-                        values.insert(k.to_string(), v);
-                    }
-                }
-            }
-            None => {
-                for k in Cfg::KEYS {
-                    values.insert(k.to_string(), self.cfg.get(k).expect("known key"));
-                }
-            }
+    fn join_previous(&mut self) {
+        if let Some(handle) = self.acquisition.take() {
+            self.stop.store(true, Ordering::SeqCst);
+            handle.join().ok();
         }
-        Ok(json!({"values": values}))
-    }
-
-    fn config_set(&mut self, params: &Value) -> Result<Value, RpcError> {
-        let mut applied = Map::new();
-        if let Some(values) = params.get("values").and_then(Value::as_object) {
-            for (k, v) in values {
-                applied.insert(k.clone(), self.cfg.set(k, v)?);
-            }
-        }
-        Ok(json!({"applied": applied}))
-    }
-
-    fn acquire_start(&mut self, ctx: &Arc<Ctx>) -> Result<Value, RpcError> {
-        if self.acq.as_ref().is_some_and(|h| !h.is_finished()) {
-            return Err(RpcError::new(BUSY, "acquisition already running"));
-        }
-        if self.cfg.sample_count <= 0 {
-            return Err(RpcError::new(INVALID_PARAMS, "sample_count must be positive"));
-        }
-        if self.cfg.samplerate <= 0.0 {
-            return Err(RpcError::new(INVALID_PARAMS, "samplerate must be positive"));
-        }
-        self.capture_id += 1;
-        let cid = self.capture_id;
-        let (cfg, ctx) = (self.cfg, ctx.clone());
-        self.acq = Some(thread::spawn(move || acquire(&ctx, cid, cfg)));
-        Ok(json!({"capture_id": cid}))
     }
 }
 
-fn acquire(ctx: &Arc<Ctx>, cid: i64, cfg: Cfg) {
-    let s = synthesize(&cfg);
-    let n = s.sine.len();
-    let encoding = json!({"dtype": "int8", "scale": s.scale, "offset": 0.0,
-                          "unit": "V", "quantity": "voltage", "digits": 3});
-    let logic_channels: Vec<String> = (0..8).map(|i| format!("D{i}")).collect();
-
-    ctx.notify("capture.begin", json!({
-        "capture_id": cid, "samplerate": cfg.samplerate, "t0": 0.0,
-        "streams": [
-            {"stream": 0, "kind": "analog", "channels": ["A0"],
-             "sample_count": n, "encoding": encoding},
-            {"stream": 1, "kind": "analog", "channels": ["A1"],
-             "sample_count": n, "encoding": encoding},
-            {"stream": 2, "kind": "logic", "channels": logic_channels,
-             "sample_count": n, "encoding": {"unitsize": 1}},
-        ]}), None);
-    ctx.notify("capture.trigger", json!({"capture_id": cid, "sample": 0}), None);
-
-    for (stream, data) in [(0, &s.sine), (1, &s.square), (2, &s.logic)] {
-        // One byte per sample in every stream here, so a byte offset is also
-        // the absolute sample index.
-        for (seq, off) in (0..data.len()).step_by(CHUNK).enumerate() {
-            let part = &data[off..(off + CHUNK).min(data.len())];
-            ctx.notify("capture.data", json!({
-                "capture_id": cid, "stream": stream, "seq": seq,
-                "first_sample": off, "nsamples": part.len()}), Some(part));
+impl DemoPlugin {
+    /// The work `Hello` does, minus the socket a live plugin has by then.
+    fn connect(&mut self, req: &Hello) -> Reply<HelloResult> {
+        // Nothing to open, but the URL still has to name something this plugin
+        // drives — a real plugin connects to the device here, and reports the
+        // failure as an Error on a live connection rather than dying.
+        if !self.device.starts_with("demo://") {
+            return Err(proto::Error::device(format!(
+                "{:?} is not a demo:// device URL",
+                self.device
+            )));
         }
+        let result = server::hello_result(
+            req,
+            PluginInfo {
+                name: "demo".to_string(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                vendor: "OpenMSO".to_string(),
+                description: "Simulated mixed-signal device".to_string(),
+            },
+            Capabilities {
+                modes: vec![
+                    AcquireMode::AcquireSingle as i32,
+                    AcquireMode::AcquireContinuous as i32,
+                    AcquireMode::AcquireSnapshot as i32,
+                ],
+                trigger_kinds: vec![TriggerKind::TriggerNone as i32],
+            },
+            DeviceInfo {
+                vendor: "OpenMSO".to_string(),
+                model: "Demo MSO".to_string(),
+                serial: "DEMO0001".to_string(),
+                firmware_version: env!("CARGO_PKG_VERSION").to_string(),
+            },
+        );
+        self.encodings = result.encodings.clone();
+        Ok(result)
     }
-    ctx.notify("capture.end", json!({"capture_id": cid, "ok": true}), None);
 }
 
 impl CaptureServer for DemoPlugin {
-    fn info(&self) -> Value {
-        json!({"name": "demo", "version": env!("CARGO_PKG_VERSION"),
-               "vendor": "OpenMSO", "description": "Simulated mixed-signal device"})
+    fn hello(&mut self, req: &Hello, _events: &Arc<Events>) -> Reply<HelloResult> {
+        self.connect(req)
     }
 
-    fn capabilities(&self) -> Value {
-        json!({"scan": true, "modes": ["single"], "raw": false,
-               "trigger_forms": []})
+    fn describe(&mut self) -> Reply<Description> {
+        let channels = ANALOG
+            .iter()
+            .enumerate()
+            .map(|(i, (id, name))| Channel {
+                id: id.to_string(),
+                name: name.to_string(),
+                kind: ChannelKind::ChannelAnalog as i32,
+                index: i as u32,
+                ..Default::default()
+            })
+            .chain((0..LOGIC_CHANNELS).map(|i| Channel {
+                id: format!("D{i}"),
+                name: format!("D{i}"),
+                kind: ChannelKind::ChannelLogic as i32,
+                index: i as u32,
+                ..Default::default()
+            }))
+            .collect();
+        Ok(Description {
+            channels,
+            limits: Some(DeviceLimits {
+                samplerate: Some(DoubleSet {
+                    range: Some(proto::DoubleRange { min: 1.0, max: 1e9, step: 0.0 }),
+                    ..Default::default()
+                }),
+                sample_depth: Some(UintSet {
+                    range: Some(UintRange { min: 1, max: MAX_SAMPLE_DEPTH, step: 1 }),
+                    ..Default::default()
+                }),
+                samplerate_settable: true,
+                sample_depth_settable: true,
+                ..Default::default()
+            }),
+            // Everything a real scope adjusts is fixed here, which an empty
+            // set is exactly how to say.
+            analog: Some(AnalogLimits {
+                couplings: vec![Coupling::Dc as i32],
+                vertical_divisions: 8,
+                ..Default::default()
+            }),
+            logic: Some(LogicLimits::default()),
+            vendor_options: Cfg::VENDOR_KEYS
+                .iter()
+                .map(|(key, description)| VendorOption {
+                    key: key.to_string(),
+                    description: description.to_string(),
+                    values: vec![],
+                })
+                .collect(),
+        })
     }
 
-    fn handle(&mut self, method: &str, params: &Value, _payload: Option<Vec<u8>>,
-              ctx: &Arc<Ctx>) -> Result<Value, RpcError> {
-        match method {
-            "scan" => Ok(json!({"devices": [
-                {"device_id": "demo0", "vendor": "OpenMSO", "model": "Demo MSO",
-                 "serial": "DEMO0001", "connection": "demo://0"}]})),
-            "open" => {
-                self.open = true;
-                Ok(json!({}))
-            }
-            "close" => {
-                self.open = false;
-                Ok(json!({}))
-            }
-            "describe" => Ok(self.describe()),
-            "config.get" => self.config_get(params),
-            "config.set" => self.config_set(params),
-            "acquire.start" => self.acquire_start(ctx),
-            "acquire.stop" => Ok(json!({})),
-            _ => Err(RpcError::method_not_found(method)),
+    fn get_config(&mut self) -> Reply<Config> {
+        Ok(self.cfg.to_config())
+    }
+
+    fn set_config(&mut self, config: &Config) -> Reply<Config> {
+        // Applied to a copy, so a request that fails half way leaves the
+        // device on the settings it had.
+        let mut cfg = self.cfg;
+        cfg.apply(config)?;
+        self.cfg = cfg;
+        Ok(cfg.to_config())
+    }
+
+    fn acquire_start(&mut self, req: &AcquireStart, events: &Arc<Events>) -> Reply<()> {
+        self.join_previous();
+        let mode = AcquireMode::try_from(req.mode).unwrap_or(AcquireMode::Unspecified);
+        if mode == AcquireMode::Unspecified {
+            return Err(proto::Error::invalid("no acquire mode"));
         }
+
+        let streams = self.streams(code_scale(&self.cfg));
+        let logic_encoding = if accepts(&self.encodings, SampleEncoding::Transition) {
+            // An idle counter bit costs almost nothing run-length encoded, and
+            // the frontend said it can expand it.
+            SampleEncoding::Transition
+        } else {
+            SampleEncoding::Packed
+        };
+
+        let stop = Arc::new(AtomicBool::new(false));
+        self.stop = stop.clone();
+        let (capture_id, cfg) = (req.capture_id, self.cfg);
+        let events = events.clone();
+        // Everything from here on — synthesis included — happens off the
+        // control loop, which must stay free to answer AcquireStop.
+        self.acquisition = Some(thread::spawn(move || {
+            let capture = Capture { capture_id, mode, cfg, streams, logic_encoding };
+            let error = capture.run(&events, &stop).err().map(|e| proto::Error::device(e.to_string()));
+            // The frontend is entitled to a CaptureEnd however this went; a
+            // failure to send it means the socket is gone anyway.
+            events
+                .send(event::Event::CaptureEnd(CaptureEnd { capture_id, error }))
+                .ok();
+        }));
+        Ok(())
+    }
+
+    fn acquire_stop(&mut self, _req: &AcquireStop) -> Reply<()> {
+        self.stop.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn reset(&mut self) -> Reply<()> {
+        self.join_previous();
+        Ok(())
+    }
+
+    fn shutdown(&mut self) {
+        self.join_previous();
     }
 }
 
-fn main() {
-    let mut plugin = DemoPlugin::new();
-    server::run_from_argv(&mut plugin);
+// --- acquisition ----------------------------------------------------------
+
+struct Capture {
+    capture_id: u64,
+    mode: AcquireMode,
+    cfg: Cfg,
+    streams: Vec<Stream>,
+    logic_encoding: SampleEncoding,
+}
+
+impl Capture {
+    fn run(&self, events: &Events, stop: &AtomicBool) -> openmso::Result<()> {
+        let synth = synthesize(&self.cfg);
+        events.send(event::Event::CaptureBegin(CaptureBegin {
+            capture_id: self.capture_id,
+            samplerate: self.cfg.samplerate,
+            streams: self.streams.clone(),
+        }))?;
+
+        let mut acquisition = 0;
+        loop {
+            self.acquire(events, &synth, acquisition)?;
+            acquisition += 1;
+            if self.mode != AcquireMode::AcquireContinuous || stop.load(Ordering::SeqCst) {
+                break;
+            }
+        }
+        events.status(State::Idle, "")
+    }
+
+    fn acquire(&self, events: &Events, synth: &Synth, acquisition: u64) -> openmso::Result<()> {
+        let samples = synth.logic.len() as u64;
+        events.status(State::Armed, "")?;
+        events.send(event::Event::AcquisitionBegin(AcquisitionBegin {
+            capture_id: self.capture_id,
+            acquisition,
+            t0: 0.0,
+            sample_count: samples,
+        }))?;
+        // A free-running device triggers on sample 0 the moment it is armed.
+        events.status(State::Triggered, "")?;
+        events.send(event::Event::Trigger(CaptureTrigger {
+            capture_id: self.capture_id,
+            acquisition,
+            sample: 0,
+        }))?;
+        events.status(State::Transferring, "")?;
+
+        for stream in &self.streams {
+            let (data, unitsize, encoding) = match &stream.format {
+                Some(stream::Format::Analog(_)) => {
+                    let data = match stream.channels.first().map(String::as_str) {
+                        Some("A0") => &synth.sine,
+                        _ => &synth.square,
+                    };
+                    (data, 1, SampleEncoding::Packed)
+                }
+                _ => (&synth.logic, 1, self.logic_encoding),
+            };
+            let mut sender = StreamSender::new(self.capture_id, acquisition, stream.id, unitsize);
+            if encoding == SampleEncoding::Transition {
+                sender = sender.transition();
+            }
+            sender.send(events, data)?;
+        }
+
+        events.send(event::Event::AcquisitionEnd(AcquisitionEnd {
+            capture_id: self.capture_id,
+            acquisition,
+            dropped_samples: 0,
+        }))
+    }
+}
+
+fn main() -> ExitCode {
+    let args = match Args::from_env() {
+        Ok(args) => args,
+        Err(e) => {
+            eprintln!("demo: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    // Ties this process's life to the frontend's: its death closes our stdin.
+    server::exit_on_stdin_eof();
+    let mut plugin = DemoPlugin::new(args.device.clone());
+    match server::serve(&args, &mut plugin) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("demo: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 #[cfg(test)]
@@ -350,7 +620,7 @@ mod tests {
 
     #[test]
     fn logic_carries_counter_below_uart() {
-        let cfg = Cfg { sample_count: 4096, ..Cfg::default() };
+        let cfg = Cfg { sample_depth: 4096, ..Cfg::default() };
         let s = synthesize(&cfg);
         assert_eq!(s.logic.len(), 4096);
         // D0-D6 is a counter, so the low 7 bits must cover the full range.
@@ -364,7 +634,7 @@ mod tests {
 
     #[test]
     fn analog_channels_span_the_code_range() {
-        let cfg = Cfg { sample_count: 8192, ..Cfg::default() };
+        let cfg = Cfg { sample_depth: 8192, ..Cfg::default() };
         let s = synthesize(&cfg);
         let peak = |v: &[u8]| v.iter().map(|&b| (b as i8) as i32).max().unwrap();
         let trough = |v: &[u8]| v.iter().map(|&b| (b as i8) as i32).min().unwrap();
@@ -378,7 +648,141 @@ mod tests {
 
     #[test]
     fn noise_is_deterministic_across_runs() {
-        let cfg = Cfg { sample_count: 512, ..Cfg::default() };
+        let cfg = Cfg { sample_depth: 512, ..Cfg::default() };
         assert_eq!(synthesize(&cfg).sine, synthesize(&cfg).sine);
+    }
+
+    #[test]
+    fn config_round_trips_through_the_wire_shape() {
+        let mut cfg = Cfg::default();
+        let wire = cfg.to_config();
+        let device = wire.device.as_ref().unwrap();
+        assert_eq!(device.samplerate, Some(1e6));
+        assert_eq!(device.sample_depth, Some(100_000));
+        // capture_span is derived, never set: depth over rate.
+        assert_eq!(device.capture_span, Some(0.1));
+
+        cfg.apply(&wire).unwrap();
+        assert_eq!(cfg.samplerate, 1e6);
+        assert_eq!(cfg.frequency, 1000.0);
+    }
+
+    #[test]
+    fn a_sparse_set_config_leaves_everything_else_alone() {
+        let mut cfg = Cfg::default();
+        cfg.apply(&Config {
+            device: Some(DeviceConfig { samplerate: Some(2e6), ..Default::default() }),
+            vendor: HashMap::from([("noise".to_string(), "0.5".to_string())]),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(cfg.samplerate, 2e6);
+        assert_eq!(cfg.noise, 0.5);
+        assert_eq!(cfg.sample_depth, Cfg::default().sample_depth);
+        assert_eq!(cfg.amplitude, Cfg::default().amplitude);
+    }
+
+    #[test]
+    fn what_the_device_cannot_do_is_refused_by_code() {
+        let refuse = |config: Config| {
+            let code = Cfg::default().apply(&config).unwrap_err().code;
+            proto::ErrorCode::try_from(code).unwrap()
+        };
+        let device = |device: DeviceConfig| Config { device: Some(device), ..Default::default() };
+
+        assert_eq!(
+            refuse(device(DeviceConfig { samplerate: Some(0.0), ..Default::default() })),
+            proto::ErrorCode::ErrorInvalidRequest
+        );
+        assert_eq!(
+            refuse(device(DeviceConfig { sample_depth: Some(0), ..Default::default() })),
+            proto::ErrorCode::ErrorInvalidRequest
+        );
+        assert_eq!(
+            refuse(device(DeviceConfig { averaging: Some(8), ..Default::default() })),
+            proto::ErrorCode::ErrorUnsupported
+        );
+        assert_eq!(
+            refuse(device(DeviceConfig {
+                trigger: Some(proto::Trigger {
+                    trigger: Some(trigger::Trigger::Edge(proto::EdgeTrigger::default())),
+                    position: 0.5,
+                }),
+                ..Default::default()
+            })),
+            proto::ErrorCode::ErrorUnsupported
+        );
+        assert_eq!(
+            refuse(Config {
+                vendor: HashMap::from([("frequency".to_string(), "loud".to_string())]),
+                ..Default::default()
+            }),
+            proto::ErrorCode::ErrorInvalidRequest
+        );
+        assert_eq!(
+            refuse(Config {
+                channels: vec![ChannelConfig { id: "C9".into(), ..Default::default() }],
+                ..Default::default()
+            }),
+            proto::ErrorCode::ErrorInvalidRequest
+        );
+    }
+
+    #[test]
+    fn disabling_a_logic_channel_is_accepted_but_reported_as_still_on() {
+        let mut cfg = Cfg::default();
+        cfg.apply(&Config {
+            channels: vec![
+                ChannelConfig { id: "D3".into(), enabled: Some(false), ..Default::default() },
+                ChannelConfig { id: "A1".into(), enabled: Some(false), ..Default::default() },
+            ],
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(cfg.enabled, [true, false], "analog channels do switch off");
+
+        let reported = cfg.to_config();
+        let d3 = reported.channels.iter().find(|c| c.id == "D3").unwrap();
+        assert_eq!(d3.enabled, Some(true), "logic channels share a packed stream");
+    }
+
+    #[test]
+    fn a_disabled_analog_channel_leaves_the_capture() {
+        let mut plugin = DemoPlugin::new("demo://0".to_string());
+        assert_eq!(plugin.streams(0.01).len(), 3, "two analog plus one logic");
+
+        plugin.cfg.enabled = [false, true];
+        let streams = plugin.streams(0.01);
+        assert_eq!(streams.len(), 2);
+        assert_eq!(streams[0].channels, ["A1"]);
+        // Stream ids stay dense, so a frontend can index by them.
+        assert_eq!(streams.iter().map(|s| s.id).collect::<Vec<_>>(), [0, 1]);
+    }
+
+    #[test]
+    fn a_non_demo_device_url_fails_the_handshake() {
+        let mut plugin = DemoPlugin::new("usb://04b4:8613".to_string());
+        let code = plugin.connect(&Hello::default()).unwrap_err().code;
+        assert_eq!(proto::ErrorCode::try_from(code).unwrap(), proto::ErrorCode::ErrorDevice);
+    }
+
+    #[test]
+    fn negotiation_picks_run_length_only_when_offered() {
+        let mut plugin = DemoPlugin::new("demo://0".to_string());
+
+        let packed_only = Hello {
+            accept_encodings: vec![SampleEncoding::Packed as i32],
+            ..Default::default()
+        };
+        let result = plugin.connect(&packed_only).unwrap();
+        assert_eq!(result.encodings, [SampleEncoding::Packed as i32]);
+        assert!(!accepts(&plugin.encodings, SampleEncoding::Transition));
+
+        let both = Hello {
+            accept_encodings: openmso::encoding::ENCODINGS.iter().map(|e| *e as i32).collect(),
+            ..Default::default()
+        };
+        plugin.connect(&both).unwrap();
+        assert!(accepts(&plugin.encodings, SampleEncoding::Transition));
     }
 }

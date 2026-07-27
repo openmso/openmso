@@ -1,16 +1,18 @@
 [workspace]
 resolver = "2"
-members = ["demo", "omso-cli", "siglent-sds1000xe", "generic-fx2"]
+members = ["demo", "omso-cli"]
+# Still on OCP v0 and excluded until their phase-2 port; the sources are
+# untouched, so re-adding them here is the whole of that change.
+exclude = ["siglent-sds1000xe", "generic-fx2"]
 
 [workspace.package]
 edition = "2021"
 license = "Apache-2.0"
 
 [workspace.dependencies]
-# OCP framing + CaptureServer/CaptureClient. Pinned by tag so a container or
-# CI build needs no sibling checkout; bump the tag here only.
-openmso = { git = "https://github.com/openmso/openmso-api.git", tag = "v0.1.0" }
-# preserve_order keeps config.set value maps in the order the client sent
-# them (application order matters, e.g. probe_factor before vdiv).
-serde_json = { version = "1", features = ["preserve_order"] }
+# OCP v1 types, nng transport, CaptureServer/CaptureClient. A path dependency
+# until openmso-api tags a v1 release: a container build needs the sibling
+# checkout inside its context, which packaging/linux/Dockerfile does not do.
+openmso = { path = "../../openmso-api/rust/openmso" }
+serde_json = "1"
 libc = "0.2"

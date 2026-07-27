@@ -10,13 +10,18 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential cmake ca-certificates curl git qt6-base-dev \
+        protobuf-compiler libprotobuf-dev libnng-dev \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
       | sh -s -- -y --profile minimal --default-toolchain "${RUST_VERSION}"
 ENV PATH=/root/.cargo/bin:$PATH
 
-COPY . /src
+# Two checkouts, because rust/Cargo.toml reaches the openmso crate by path
+# until openmso-api tags a release. The layout must match that ../.. so the
+# manifest resolves without editing: /src/rust/../../openmso-api.
+COPY openmso /src
+COPY openmso-api /openmso-api
 WORKDIR /src
 
 RUN cargo build --release --locked --manifest-path rust/Cargo.toml
@@ -47,7 +52,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libqt6widgets6 libqt6network6 libqt6concurrent6 qt6-qpa-plugins \
+        libnng1 libprotobuf32 \
     && rm -rf /var/lib/apt/lists/*
+
 
 COPY --from=build /out/ /tmp/dist/
 
@@ -62,10 +69,10 @@ RUN set -eu; \
             echo "FAIL: unresolved libraries in ${exe}" >&2; exit 1; \
         fi; \
     done; \
-    "${root}/bin/omso-cli" capture -o /tmp/smoke.sr --csv /tmp/smoke.csv; \
+    "${root}/bin/omso-cli" --plugin demo --device demo://0 \
+        capture -o /tmp/smoke.sr --csv /tmp/smoke.csv; \
     test -s /tmp/smoke.sr; \
     test -s /tmp/smoke.csv; \
-    "${root}/bin/omso-cli" scan | grep -q "demo0"; \
     # A GUI still alive when timeout fires (124) started cleanly; any other
     # status means it failed to open a display or load its platform plugin.
     QT_QPA_PLATFORM=offscreen timeout 10 "${root}/bin/omso" \

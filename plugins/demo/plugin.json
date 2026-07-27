@@ -1,7 +1,13 @@
 {
     "name": "demo",
     "description": "Simulated mixed-signal device for testing frontends and the protocol",
+    "vendor": "OpenMSO",
+    "version": "0.0.1",
+    "license": "Apache-2.0",
     "run": ["../../rust/target/release/demo"],
     "build": "cargo build --release   (run in rust/)",
-    "license": "Apache-2.0"
+    "urlSchemes": ["demo"],
+    "palette": {
+        "analog": ["COLOR_YELLOW", "COLOR_MAGENTA"]
+    }
 }

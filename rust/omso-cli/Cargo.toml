@@ -8,5 +8,6 @@ license.workspace = true
 [dependencies]
 clap = { version = "4.6.4", features = ["derive"] }
 openmso.workspace = true
+serde = "1"
 serde_json.workspace = true
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
