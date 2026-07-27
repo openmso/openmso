@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["siglent-sds1000xe", "generic-fx2"]
+members = ["demo", "omso-cli", "siglent-sds1000xe", "generic-fx2"]
 
 [workspace.package]
 edition = "2021"

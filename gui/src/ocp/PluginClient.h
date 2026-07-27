@@ -81,7 +81,7 @@ public:
 
     // Convenience for the common "initialize" handshake.
     QJsonObject initialize(const QString &clientName =
-                               QStringLiteral("openmso-gui"),
+                               QStringLiteral("omso"),
                            const QString &clientVersion =
                                QStringLiteral("0.1.0"));
 

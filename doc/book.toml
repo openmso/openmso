@@ -9,7 +9,6 @@ build-dir = "book"
 create-missing = false
 
 [output.html]
-site-url = "/"
 git-repository-url = "https://github.com/openmso/openmso"
 edit-url-template = "https://github.com/openmso/openmso/edit/main/doc/{path}"
 

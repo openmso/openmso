@@ -1,0 +1,12 @@
+[package]
+name = "omso-cli"
+version = "0.0.1"
+description = "OpenMSO command-line frontend"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+clap = { version = "4.6.4", features = ["derive"] }
+openmso.workspace = true
+serde_json.workspace = true
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }

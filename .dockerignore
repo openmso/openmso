@@ -1,0 +1,8 @@
+.git
+dist
+docs
+doc/book
+rust/target
+gui/build*
+__pycache__
+*.pyc

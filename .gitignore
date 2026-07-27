@@ -1,3 +1,12 @@
 rust/target/
 __pycache__/
 *.pyc
+
+# Build trees and release artifacts.
+build*/
+dist/
+doc/book/
+
+# LLM-generated working notes and plans. The published placeholder docs site
+# is doc/ (tracked); docs/ is scratch and is deliberately not committed.
+docs/

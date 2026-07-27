@@ -1,0 +1,7 @@
+# Notice
+
+Your notice text here.
+
+## Runtime requirements
+
+    apt install libqt6widgets6 libqt6network6 libqt6concurrent6 qt6-qpa-plugins

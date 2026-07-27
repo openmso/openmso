@@ -152,7 +152,7 @@ set_target_properties(openmso-ocp PROPERTIES
 
 # --- main executable -----------------------------------------------------
 
-qt_add_executable(openmso-gui
+qt_add_executable(omso
     main.cpp
     ui/DeriveLogicDialog.cpp
     ui/DeriveLogicDialog.h
@@ -164,15 +164,15 @@ qt_add_executable(openmso-gui
     ui/Session.h
 )
 
-target_include_directories(openmso-gui PRIVATE
+target_include_directories(omso PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-target_compile_definitions(openmso-gui PRIVATE
+target_compile_definitions(omso PRIVATE
     OPENMSO_PLUGINS_DIR="${OPENMSO_PLUGINS_DIR}"
 )
 
-target_link_libraries(openmso-gui PRIVATE
+target_link_libraries(omso PRIVATE
     openmso-data
     openmso-view
     openmso-measure
@@ -183,12 +183,12 @@ target_link_libraries(openmso-gui PRIVATE
     Qt6::Widgets
 )
 
-set_target_properties(openmso-gui PROPERTIES
+set_target_properties(omso PROPERTIES
     WIN32_EXECUTABLE ON
     MACOSX_BUNDLE ON
 )
 
-install(TARGETS openmso-gui
+install(TARGETS omso
     RUNTIME DESTINATION bin
     BUNDLE DESTINATION bin
 )

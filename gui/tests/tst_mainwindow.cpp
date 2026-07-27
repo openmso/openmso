@@ -15,7 +15,7 @@ private slots:
     void statusBarShowsIdle();
 };
 
-// M0 user story: "I run openmso-gui and a window appears."
+// M0 user story: "I run omso and a window appears."
 // Constructs the window, shows it, and verifies the chrome
 // (central widget, toolbar, status bar) is in place.
 void TestMainWindow::windowAppears()
