@@ -179,10 +179,21 @@ fn cmd_capture(client: &mut CaptureClient, args: &CaptureArgs) -> Result<(), Str
     write_outputs(&capture, args)
 }
 
+/// Bytes per packed logic sample, which is what `logic` is measured in.
+fn logic_unitsize(capture: &Capture) -> usize {
+    capture.logic_channels.len().div_ceil(8).max(1)
+}
+
+fn sample_count(capture: &Capture) -> usize {
+    let analog = capture.analog.iter().map(|a| a.volts.len()).max().unwrap_or(0);
+    analog.max(capture.logic.len() / logic_unitsize(capture))
+}
+
 fn report(capture: &Capture) {
-    let samples = capture.analog.iter().map(|a| a.volts.len()).max().unwrap_or(0);
-    println!("capture: {} analog channel(s), {samples} samples @ {} Sa/s",
-             capture.analog.len(), fmt_rate(capture.samplerate));
+    let samples = sample_count(capture);
+    println!("capture: {} analog + {} logic channel(s), {samples} samples @ {} Sa/s",
+             capture.analog.len(), capture.logic_channels.len(),
+             fmt_rate(capture.samplerate));
     if let Some(sample) = capture.trigger_sample {
         let t = sample as f64 / capture.samplerate + capture.t0;
         println!("  trigger at sample {sample} (t = {t:+.6} s)");
@@ -226,11 +237,15 @@ fn write_outputs(capture: &Capture, args: &CaptureArgs) -> Result<(), String> {
 }
 
 fn write_csv(path: &Path, capture: &Capture, step: usize) -> std::io::Result<()> {
-    let samples = capture.analog.iter().map(|a| a.volts.len()).max().unwrap_or(0);
+    let samples = sample_count(capture);
+    let unitsize = logic_unitsize(capture);
     let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
     write!(w, "time")?;
     for a in &capture.analog {
         write!(w, ",{}", a.name)?;
+    }
+    for name in &capture.logic_channels {
+        write!(w, ",{name}")?;
     }
     writeln!(w)?;
     for i in (0..samples).step_by(step) {
@@ -238,6 +253,14 @@ fn write_csv(path: &Path, capture: &Capture, step: usize) -> std::io::Result<()>
         for a in &capture.analog {
             match a.volts.get(i) {
                 Some(v) => write!(w, ",{v:.12e}")?,
+                None => write!(w, ",")?,
+            }
+        }
+        for (bit, _) in capture.logic_channels.iter().enumerate() {
+            // Channel `bit` is bit `bit` of the packed unit, little-endian
+            // across the unit.
+            match capture.logic.get(i * unitsize + bit / 8) {
+                Some(byte) => write!(w, ",{}", (byte >> (bit % 8)) & 1)?,
                 None => write!(w, ",")?,
             }
         }

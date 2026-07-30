@@ -1,6 +1,6 @@
 #pragma once
 
-#include <QJsonObject>
+#include <QMap>
 #include <QObject>
 #include <QPointer>
 
@@ -11,12 +11,11 @@ namespace openmso::data { class LogicSegment; class AnalogSegment; }
 
 namespace openmso::ui {
 
-// Bridges OCP notifications (from PluginClient) to the data model
-// (Capture/Signal/Segment). Owns the PluginClient and the Capture.
-// Per docs/gui-plan/07-ocp-client.md "Mapping OCP → data model".
+// Bridges OCP events to the data model (Capture/Signal/Segment). Owns the
+// PluginClient and the Capture.
 //
-// One Session = one plugin connection + one capture. The GUI creates
-// a Session on Connect, tears it down on Disconnect.
+// One Session = one plugin connection = one device, for the life of the
+// plugin process: OCP v1 has no reopen, so a new device means a new Session.
 class Session : public QObject {
     Q_OBJECT
 public:
@@ -25,65 +24,55 @@ public:
     data::Capture *capture() const { return capture_; }
     ocp::PluginClient *client() const { return client_; }
 
-    // Take ownership of an already-launched client (transferred from
-    // the caller). The session connects notification handling and
-    // drives the initialize → scan → open → describe handshake.
-    bool attachClient(ocp::PluginClient *client);
+    // Launch `pluginName` from `pluginsDir` against `device`, then Hello and
+    // Describe. An empty `device` tries the manifest's candidate URLs in turn
+    // and keeps the first that answers. Returns false with deviceError()
+    // emitted on failure.
+    bool connectTo(const QString &pluginsDir, const QString &pluginName,
+                   const QString &device = {});
 
-    // Drive the full Connect flow: launch the plugin, initialize,
-    // scan, open device 0, describe. Returns true on success.
-    // `pluginsDir` is the path searched for plugin manifests.
-    bool connectDemo(const QString &pluginsDir);
-
-    // Start an acquisition. Returns the capture_id or -1 on error.
-    qint64 startCapture();
+    // Returns the capture id, or 0 on error.
+    quint64 startCapture(bool continuous = false);
     void stopCapture();
 
     void disconnectFromPlugin();
 
 signals:
-    // Emitted after describe() returns, with the device summary
-    // suitable for the status bar.
     void deviceReady(const QString &summary);
     void deviceError(const QString &message);
 
 private:
-    void handleNotification(const QString &method,
-                            const QJsonObject &params,
-                            const QByteArray &payload);
+    // One launch + Hello + Describe. Reports failure through `error` rather
+    // than deviceError(), so trying the next candidate stays quiet.
+    bool tryConnect(const ocp::PluginManifest &manifest, const QString &device,
+                    QString *error);
 
-    void onCaptureBegin(const QJsonObject &params);
-    void onCaptureData(const QJsonObject &params, const QByteArray &payload);
-    void onCaptureTrigger(const QJsonObject &params);
-    void onCaptureEnd(const QJsonObject &params);
+    void onEvent(const ::openmso::pb::Event &event);
 
-    // Find the signal + segment for a stream index, or nullptr.
-    struct StreamTarget {
-        data::Signal *signal = nullptr;
-        data::LogicSegment *logic = nullptr;
-        data::AnalogSegment *analog = nullptr;
-    };
-    StreamTarget resolveStream(int streamIndex) const;
+    void onCaptureBegin(const ::openmso::pb::CaptureBegin &begin);
+    void onAcquisitionBegin(const ::openmso::pb::AcquisitionBegin &begin);
+    void onData(const ::openmso::pb::CaptureData &data);
+    void onTrigger(const ::openmso::pb::CaptureTrigger &trigger);
+    void onCaptureEnd(const ::openmso::pb::CaptureEnd &end);
 
-    QPointer<ocp::PluginClient> client_;
-    data::Capture *capture_;       // owned (child)
-
-    // Stream index → (signal id list, kind, unitsize/dtype).
     struct StreamInfo {
-        int stream = -1;
-        QStringList channelIds;   // for logic: 8 ids; for analog: 1 id
-        QString kind;             // "logic" | "analog"
-        // analog:
+        QStringList channelIds;
+        bool logic = false;
         data::AnalogDType dtype = data::AnalogDType::Int8;
         double scale = 1.0;
         double offset = 0.0;
         QString unit;
-        // logic:
         int unitsize = 1;
-        qint64 sampleCount = 0;   // expected, from capture.begin
     };
-    QMap<int, StreamInfo> streams_;
-    QString deviceId_;
+
+    QPointer<ocp::PluginClient> client_;
+    data::Capture *capture_;   // owned (child)
+
+    QMap<quint32, StreamInfo> streams_;
+    quint64 captureId_ = 0;
+    double samplerate_ = 0.0;
+    bool segmentsReady_ = false;
+    QString device_;
 };
 
 } // namespace openmso::ui

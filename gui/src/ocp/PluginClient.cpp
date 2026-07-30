@@ -1,41 +1,84 @@
 #include "PluginClient.h"
 
-#include <QAbstractSocket>
-#include <QEventLoop>
-#include <QJsonArray>
-#include <QJsonDocument>
-#include <QJsonObject>
-#include <QProcess>
-#include <QTcpSocket>
-#include <QTimer>
+#include <QDebug>
 
 namespace openmso::ocp {
 
 namespace {
 
-constexpr int kProtocolVersion = 0;
+// Short enough that stop() is noticed promptly, long enough not to spin.
+constexpr std::chrono::milliseconds READER_POLL{200};
 
-QByteArray serializeMessage(QJsonObject msg,
-                            const QByteArray &payload)
+std::vector<std::string> toArgv(const QStringList &list)
 {
-    if (!payload.isEmpty())
-        msg.insert(QStringLiteral("binlen"), payload.size());
-    msg.insert(QStringLiteral("jsonrpc"), QStringLiteral("2.0"));
-    return QJsonDocument(msg).toJson(QJsonDocument::Compact) + '\n';
+    std::vector<std::string> out;
+    out.reserve(list.size());
+    for (const QString &s : list)
+        out.push_back(s.toStdString());
+    return out;
 }
 
 } // namespace
 
-PluginClient::PluginClient(QObject *parent)
-    : QObject(parent)
+EventReader::EventReader(::openmso::EventStream stream)
+    : stream_(std::move(stream)) {}
+
+void EventReader::run()
 {
-    stream_.onMessage([this](const QJsonObject &msg, const QByteArray &payload) {
-        handleParsedMessage(msg, payload);
-    });
-    stream_.onEof([this] { onAboutToClose(); });
-    stream_.onError([this](const QString &what) {
-        qWarning("ocp: stream parse error: %s", qPrintable(what));
-    });
+    try {
+        stream_.setTimeout(READER_POLL);
+        while (!stop_) {
+            try {
+                emit event(stream_.next());
+            } catch (const ::openmso::Error &e) {
+                if (e.kind() == ::openmso::ErrorKind::Nng && !stop_)
+                    continue;  // poll timeout
+                throw;
+            }
+        }
+    } catch (const std::exception &e) {
+        if (!stop_)
+            emit failed(QString::fromUtf8(e.what()));
+    }
+    emit finished();
+}
+
+PluginClient::PluginClient(::openmso::CaptureClient client, QObject *parent)
+    : QObject(parent),
+      client_(std::make_unique<::openmso::CaptureClient>(std::move(client)))
+{
+    startReader();
+}
+
+PluginClient *PluginClient::launch(const PluginManifest &manifest,
+                                   const QString &device, QString *error,
+                                   QObject *parent)
+{
+    qRegisterMetaType<::openmso::pb::Event>();
+    try {
+        auto client = ::openmso::CaptureClient::launch(toArgv(manifest.argv),
+                                                       device.toStdString());
+        return new PluginClient(std::move(client), parent);
+    } catch (const std::exception &e) {
+        if (error)
+            *error = QString::fromUtf8(e.what());
+        return nullptr;
+    }
+}
+
+void PluginClient::startReader()
+{
+    thread_ = new QThread(this);
+    reader_ = new EventReader(client_->eventStream());
+    reader_->moveToThread(thread_);
+
+    connect(thread_, &QThread::started, reader_, &EventReader::run);
+    connect(reader_, &EventReader::event, this, &PluginClient::event);
+    connect(reader_, &EventReader::failed, this, &PluginClient::streamFailed);
+    connect(reader_, &EventReader::finished, thread_, &QThread::quit);
+    connect(thread_, &QThread::finished, reader_, &QObject::deleteLater);
+
+    thread_->start();
 }
 
 PluginClient::~PluginClient()
@@ -43,331 +86,70 @@ PluginClient::~PluginClient()
     shutdown();
 }
 
-bool PluginClient::isConnected() const
+void PluginClient::shutdown()
 {
-    return io_ != nullptr && io_->isOpen();
-}
-
-// ---- factories ---------------------------------------------------------
-
-PluginClient *PluginClient::launch(const PluginManifest &manifest,
-                                   QObject *parent)
-{
-    return launch(manifest.argv, manifest.pluginDir, parent);
-}
-
-PluginClient *PluginClient::launch(const QStringList &argv,
-                                   const QString &workingDir,
-                                   QObject *parent)
-{
-    auto *c = new PluginClient(parent);
-    auto *p = new QProcess(c);
-    p->setProcessChannelMode(QProcess::SeparateChannels); // stdout=OCP, stderr inherited
-    if (!workingDir.isEmpty())
-        p->setWorkingDirectory(workingDir);
-
-    // Wait for the process to actually start; QProcess::start() is
-    // async, but we want launch() to return a client whose io_ is
-    // either usable or nullptr.
-    p->start(argv.isEmpty() ? QString() : argv.first(),
-             argv.isEmpty() ? QStringList{} : argv.mid(1));
-    if (!p->waitForStarted(3000)) {
-        qWarning("ocp: failed to start plugin: %s",
-                 qPrintable(p->errorString()));
-        delete c;
-        return nullptr;
-    }
-    c->proc_ = p;
-    c->attach(p);
-    return c;
-}
-
-PluginClient *PluginClient::connectToHost(const QString &host, quint16 port,
-                                         QObject *parent)
-{
-    auto *c = new PluginClient(parent);
-    auto *s = new QTcpSocket(c);
-    s->connectToHost(host, port);
-    if (!s->waitForConnected(3000)) {
-        qWarning("ocp: failed to connect to %s:%u: %s",
-                 qPrintable(host), port, qPrintable(s->errorString()));
-        delete c;
-        return nullptr;
-    }
-    c->sock_ = s;
-    c->attach(s);
-    return c;
-}
-
-void PluginClient::attach(QIODevice *io)
-{
-    io_ = io;
-    QObject::connect(io, &QIODevice::readyRead,
-                     this, &PluginClient::onReadyRead);
-    QObject::connect(io, &QIODevice::aboutToClose,
-                     this, &PluginClient::onAboutToClose);
-    // Drain anything already in the buffer (rare, but safe).
-    if (io->bytesAvailable() > 0)
-        onReadyRead();
-}
-
-// ---- request paths -----------------------------------------------------
-
-QJsonObject PluginClient::request(const QString &method,
-                                  const QJsonObject &params,
-                                  const QByteArray &payload,
-                                  int timeoutMs)
-{
-    if (!io_ || !io_->isOpen())
-        throw PluginError(-1, QStringLiteral("client not connected"));
-
-    const int id = ++nextId_;
-    QJsonObject msg{
-        {QStringLiteral("id"), id},
-        {QStringLiteral("method"), method},
-        {QStringLiteral("params"), params},
-    };
-
-    QJsonObject result;
-    PluginError err(-1, QStringLiteral("no response"));
-    bool gotResponse = false;
-    QEventLoop loop;
-    pending_[id] = PendingSlot{
-        id, /*isAsync=*/false, ResponseCb{},
-        &result, &err, &loop, &gotResponse
-    };
-
-    if (!writeMessage(msg, payload)) {
-        pending_.remove(id);
-        throw PluginError(-1, QStringLiteral("write failed"));
+    // The reader has to go first: it holds a borrowed handle on the event
+    // socket, which CaptureClient closes as it dies.
+    if (thread_) {
+        if (reader_)
+            reader_->stop();
+        thread_->quit();
+        thread_->wait();
+        thread_ = nullptr;
+        reader_ = nullptr;
     }
 
-    QTimer::singleShot(timeoutMs, &loop, &QEventLoop::quit);
-    loop.exec();
-
-    if (pending_.contains(id)) {
-        // Timed out — no response ever arrived.
-        pending_.remove(id);
-        throw PluginError(-1, QStringLiteral("no response to '%1' within %2ms")
-                              .arg(method).arg(timeoutMs));
+    if (client_) {
+        try {
+            client_->shutdown();
+        } catch (const std::exception &e) {
+            qWarning("plugin shutdown: %s", e.what());
+        }
+        client_.reset();
     }
-    if (!gotResponse) {
-        // Stream closed before the response arrived (failAllPending ran).
-        throw PluginError(-1, QStringLiteral("plugin exited before responding"));
-    }
-    if (err.code() != -1)
-        throw err;
-    return result;
 }
 
-int PluginClient::requestAsync(const QString &method,
-                               const QJsonObject &params,
-                               ResponseCb cb,
-                               const QByteArray &payload)
+bool PluginClient::isRunning() const
 {
-    const int id = ++nextId_;
-    QJsonObject msg{
-        {QStringLiteral("id"), id},
-        {QStringLiteral("method"), method},
-        {QStringLiteral("params"), params},
-    };
-    pending_[id] = PendingSlot{
-        id, /*isAsync=*/true, std::move(cb),
-        /*syncResult=*/nullptr, /*syncError=*/nullptr, /*loop=*/nullptr
-    };
-    if (!writeMessage(msg, payload)) {
-        pending_.remove(id);
-        if (cb) cb({}, new PluginError(-1, QStringLiteral("write failed")));
-    }
+    return client_ && client_->isRunning();
+}
+
+::openmso::pb::HelloResult PluginClient::hello(const QString &clientName,
+                                               const QString &clientVersion)
+{
+    return client_->hello(clientName.toStdString(), clientVersion.toStdString());
+}
+
+::openmso::pb::Description PluginClient::describe()
+{
+    return client_->describe();
+}
+
+::openmso::pb::Config PluginClient::getConfig()
+{
+    return client_->getConfig();
+}
+
+::openmso::pb::Config PluginClient::setConfig(const ::openmso::pb::Config &config)
+{
+    return client_->setConfig(config);
+}
+
+quint64 PluginClient::acquireStart(::openmso::pb::AcquireMode mode)
+{
+    const std::uint64_t id = client_->nextCaptureId();
+    client_->acquireStart(id, mode);
     return id;
 }
 
-void PluginClient::sendNotification(const QString &method,
-                                   const QJsonObject &params,
-                                   const QByteArray &payload)
+void PluginClient::acquireStop(quint64 captureId)
 {
-    QJsonObject msg{
-        {QStringLiteral("method"), method},
-        {QStringLiteral("params"), params},
-    };
-    writeMessage(msg, payload);
+    client_->acquireStop(captureId);
 }
 
-QJsonObject PluginClient::initialize(const QString &clientName,
-                                    const QString &clientVersion)
+void PluginClient::reset()
 {
-    return request(QStringLiteral("initialize"),
-                   QJsonObject{
-                       {QStringLiteral("protocol_version"), kProtocolVersion},
-                       {QStringLiteral("client"), QJsonObject{
-                           {QStringLiteral("name"), clientName},
-                           {QStringLiteral("version"), clientVersion},
-                       }},
-                   });
-}
-
-void PluginClient::setNotificationHandler(NotificationHandler h)
-{
-    handler_ = std::move(h);
-}
-
-void PluginClient::shutdown()
-{
-    if (io_ && io_->isOpen()) {
-        // Best-effort shutdown request; ignore errors.
-        try {
-            // Use a short timeout so a wedged plugin doesn't hang us.
-            // We bypass request() because we don't want to throw.
-            const int id = ++nextId_;
-            QJsonObject msg{
-                {QStringLiteral("id"), id},
-                {QStringLiteral("method"), QStringLiteral("shutdown")},
-                {QStringLiteral("params"), QJsonObject{}},
-            };
-            writeMessage(msg, {});
-            // Don't wait for the response — closing the stream is
-            // authoritative. The reader will failAllPending() on EOF.
-        } catch (...) {
-            // ignore
-        }
-    }
-
-    if (proc_) {
-        proc_->closeWriteChannel();
-        if (proc_->state() != QProcess::NotRunning) {
-            if (!proc_->waitForFinished(3000))
-                proc_->kill();
-        }
-    }
-    if (sock_) {
-        sock_->abort();
-    }
-    if (io_) {
-        io_->close();
-        io_ = nullptr;
-    }
-    failAllPending(QStringLiteral("shutdown"));
-}
-
-// ---- reader ------------------------------------------------------------
-
-void PluginClient::onReadyRead()
-{
-    if (!io_)
-        return;
-    // Read whatever is available; MessageStream will buffer partial
-    // messages and dispatch complete ones.
-    QByteArray chunk = io_->readAll();
-    stream_.feed(chunk);
-}
-
-void PluginClient::onAboutToClose()
-{
-    failAllPending(QStringLiteral("stream closed"));
-    if (io_) io_ = nullptr;
-    emit disconnected();
-}
-
-void PluginClient::handleParsedMessage(const QJsonObject &msg,
-                                       const QByteArray &payload)
-{
-    const auto idVal = msg.value(QStringLiteral("id"));
-
-    // Response to a request?
-    if (!idVal.isUndefined() && !msg.contains(QStringLiteral("method"))) {
-        const int id = idVal.toInt(-1);
-        auto it = pending_.find(id);
-        if (it == pending_.end())
-            return; // unknown id — probably a duplicate; drop it
-
-        PendingSlot slot = it.value();
-        pending_.erase(it);
-
-        if (msg.contains(QStringLiteral("error"))) {
-            const auto errObj = msg.value(QStringLiteral("error")).toObject();
-            PluginError e(errObj.value(QStringLiteral("code")).toInt(-1),
-                          errObj.value(QStringLiteral("message")).toString(),
-                          errObj.value(QStringLiteral("data")));
-            if (slot.isAsync) {
-                if (slot.asyncCb)
-                    slot.asyncCb({}, &e);
-            } else if (slot.syncError) {
-                *slot.syncError = e;
-                if (slot.syncGotResponse) *slot.syncGotResponse = true;
-            }
-        } else {
-            const QJsonObject result =
-                msg.value(QStringLiteral("result")).toObject();
-            if (slot.isAsync) {
-                if (slot.asyncCb)
-                    slot.asyncCb(result, nullptr);
-            } else if (slot.syncResult) {
-                *slot.syncResult = result;
-                if (slot.syncGotResponse) *slot.syncGotResponse = true;
-            }
-        }
-        if (slot.loop)
-            QMetaObject::invokeMethod(slot.loop, "quit", Qt::QueuedConnection);
-        return;
-    }
-
-    // Notification (has method, no id) or a server-initiated request
-    // (has method AND id — we don't support those, treat as notif).
-    if (msg.contains(QStringLiteral("method"))) {
-        const QString method = msg.value(QStringLiteral("method")).toString();
-        const QJsonObject params =
-            msg.value(QStringLiteral("params")).toObject();
-        // Always emit the Qt signal (queued from a worker thread if
-        // we ever add one; direct here since we're on the GUI thread).
-        emit notification(method, params, payload);
-        if (handler_) {
-            try {
-                handler_(method, params, payload);
-            } catch (const std::exception &e) {
-                qWarning("ocp: notification handler threw: %s", e.what());
-            }
-        }
-    }
-}
-
-void PluginClient::failAllPending(const QString &reason)
-{
-    auto pending = std::move(pending_);
-    pending_.clear();
-    for (auto &slot : pending) {
-        if (slot.isAsync) {
-            if (slot.asyncCb)
-                slot.asyncCb({}, new PluginError(-1, reason));
-        } else if (slot.syncError) {
-            *slot.syncError = PluginError(-1, reason);
-        }
-        if (slot.loop)
-            QMetaObject::invokeMethod(slot.loop, "quit", Qt::QueuedConnection);
-    }
-}
-
-bool PluginClient::writeMessage(const QJsonObject &msg,
-                                const QByteArray &payload)
-{
-    if (!io_ || !io_->isOpen())
-        return false;
-    const QByteArray bytes = serializeMessage(msg, payload);
-    qint64 written = 0;
-    while (written < bytes.size()) {
-        const qint64 n = io_->write(bytes.constData() + written,
-                                    bytes.size() - written);
-        if (n < 0)
-            return false;
-        written += n;
-    }
-    // QProcess and QTcpSocket both have flush(); QIODevice doesn't.
-    // For QProcess, write() already pushes to the OS pipe; for
-    // QTcpSocket we want the bytes on the wire now.
-    if (auto *p = qobject_cast<QProcess *>(io_))
-        p->waitForBytesWritten(100);
-    else if (auto *s = qobject_cast<QTcpSocket *>(io_))
-        s->flush();
-    return true;
+    client_->reset();
 }
 
 } // namespace openmso::ocp

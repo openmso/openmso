@@ -1,6 +1,6 @@
 # OPENMSO_PLUGINS_DIR is defined in the top-level CMakeLists.txt.
 
-# --- tst_mainwindow: M0 chrome test -------------------------------------
+# --- tst_mainwindow: window chrome --------------------------------------
 
 add_executable(tst_mainwindow
     tst_mainwindow.cpp
@@ -26,7 +26,6 @@ target_link_libraries(tst_mainwindow PRIVATE
     Qt6::Core
     Qt6::Gui
     Qt6::Widgets
-    Qt6::Network
     Qt6::Test
 )
 
@@ -39,7 +38,7 @@ set_tests_properties(tst_mainwindow PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
 )
 
-# --- tst_pluginclient: M1 OCP client test -------------------------------
+# --- tst_pluginclient: OCP client against the demo plugin ---------------
 
 add_executable(tst_pluginclient
     tst_pluginclient.cpp
@@ -56,7 +55,6 @@ target_compile_definitions(tst_pluginclient PRIVATE
 target_link_libraries(tst_pluginclient PRIVATE
     openmso-ocp
     Qt6::Core
-    Qt6::Network
     Qt6::Test
 )
 
@@ -65,7 +63,7 @@ set_tests_properties(tst_pluginclient PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
 )
 
-# --- tst_capture: M2 data model test ------------------------------------
+# --- tst_capture: data model --------------------------------------------
 
 add_executable(tst_capture
     tst_capture.cpp
@@ -86,7 +84,7 @@ set_tests_properties(tst_capture PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
 )
 
-# --- tst_view: M2 view paint test ---------------------------------------
+# --- tst_view: view painting --------------------------------------------
 
 add_executable(tst_view
     tst_view.cpp
@@ -110,7 +108,7 @@ set_tests_properties(tst_view PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
 )
 
-# --- tst_measure: measurement engine test -------------------------------
+# --- tst_measure: measurement engine ------------------------------------
 
 add_executable(tst_measure
     tst_measure.cpp
@@ -155,9 +153,34 @@ target_link_libraries(m2_smoke PRIVATE
     Qt6::Core
     Qt6::Gui
     Qt6::Widgets
-    Qt6::Network
 )
 add_test(NAME m2_smoke COMMAND m2_smoke)
 set_tests_properties(m2_smoke PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+)
+
+# Not add_test(): fx2_bench needs an fx2lafw device on the bus. Built so it
+# keeps compiling; run by hand.
+
+qt_add_executable(fx2_bench
+    fx2_bench.cpp
+    ../src/ui/DeriveLogicDialog.cpp
+    ../src/ui/MainWindow.cpp
+    ../src/ui/MeasurementsPanel.cpp
+    ../src/ui/Session.cpp
+)
+target_include_directories(fx2_bench PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+)
+target_compile_definitions(fx2_bench PRIVATE
+    OPENMSO_PLUGINS_DIR="${OPENMSO_PLUGINS_DIR}"
+)
+target_link_libraries(fx2_bench PRIVATE
+    openmso-data
+    openmso-view
+    openmso-measure
+    openmso-ocp
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Widgets
 )

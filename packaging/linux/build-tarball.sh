@@ -15,16 +15,6 @@ if [ -z "${ENGINE}" ]; then
 fi
 
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
-
-# The context is the directory above the repo so the sibling openmso-api
-# checkout comes along; rust/Cargo.toml depends on it by path. Both checkouts
-# must therefore keep their default directory names.
-if [ "$(basename "${repo_root}")" != "openmso" ] \
-   || [ ! -f "${repo_root}/../openmso-api/rust/openmso/Cargo.toml" ]; then
-    echo "$0: expected checkouts named openmso/ and openmso-api/ side by side" >&2
-    exit 1
-fi
-
 out="${repo_root}/dist"
 tag="openmso-artifact:${VERSION}"
 
@@ -35,7 +25,7 @@ echo "==> building ${NAME} with $(basename "${ENGINE}")"
     --build-arg "TARGET=${TARGET}" \
     -t "${tag}" \
     -f "${repo_root}/packaging/linux/Dockerfile" \
-    "${repo_root}/.."
+    "${repo_root}"
 
 echo "==> extracting to ${out}"
 mkdir -p "${out}"

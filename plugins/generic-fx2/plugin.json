@@ -1,7 +1,15 @@
 {
     "name": "generic-fx2",
     "description": "Cypress FX2 (fx2lafw) logic analyzers (Saleae Logic clone and siblings)",
+    "vendor": "OpenMSO",
+    "version": "0.1.0",
+    "license": "Apache-2.0",
     "run": ["../../rust/target/release/generic-fx2"],
     "build": "cargo build --release   (run in rust/)",
-    "license": "Apache-2.0"
+    "urlSchemes": ["usb"],
+    "usbIds": [
+        {"id": "0925:3881", "note": "Saleae Logic clone; keeps this id after upload"},
+        {"id": "04b4:8613", "note": "bare Cypress FX2", "needsFirmware": true},
+        {"id": "1d50:608c", "note": "bare Cypress FX2 once fx2lafw is running"}
+    ]
 }

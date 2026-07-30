@@ -1,36 +1,43 @@
 #pragma once
 
+#include <openmso/manifest.h>
+
+#include <QList>
 #include <QString>
 #include <QStringList>
 
 namespace openmso::ocp {
 
-// Resolved plugin manifest: a name, a launch argv (with {python}
-// expanded and relative paths resolved against the plugin dir), and
-// the originating directory. Mirrors python/openmso/client.py's
-// find_plugin() output.
+// A plugin.json found on disk, with its launch argv already resolved.
 struct PluginManifest {
     QString name;
     QString description;
-    QStringList argv;     // resolved, ready for QProcess::start
+    QStringList argv;
     QString pluginDir;
+    QStringList urlSchemes;
+
+    // The parsed message, for the fields the GUI reads case by case
+    // (palette, usbIds).
+    ::openmso::pb::PluginManifest message;
+
+    bool isNull() const { return name.isEmpty(); }
 };
 
-// Walk `<pluginsDir>/<name>/plugin.json` and return one manifest per
-// plugin found. Plugins whose manifest is unreadable or missing the
-// `run` key are silently skipped (a warning is sent to qWarning()).
-// `pluginsDir` is typically `<repo>/plugins` in developer mode or
-// `<install_prefix>/lib/openmso/plugins` for a bundled install.
-//
-// {python} expansion: OPENMSO_PYTHON env var if set, else "python3"
-// on Unix / "python.exe" on Windows (bundled interpreter).
+// Reads `<pluginsDir>/<name>/plugin.json`. A manifest that fails to parse is
+// skipped with a qWarning() rather than aborting the scan.
 QList<PluginManifest> findPlugins(const QString &pluginsDir);
 
-// Resolve a single plugin by name. Returns an empty PluginManifest
-// (empty name) if not found.
+// Null manifest if there is no such plugin.
 PluginManifest findPlugin(const QString &pluginsDir, const QString &name);
 
-// Resolve {python} in argv[0..] according to env/platform rules.
-QStringList expandPython(const QStringList &argv, const QString &pluginDir);
+// Device URLs worth trying for this plugin, in declaration order.
+//
+// Stands in for the frontend USB enumeration of the OCP v1 design: until the
+// GUI can see the bus itself it cannot tell which of a manifest's usbIds is
+// plugged in, so it offers each in turn and keeps the one that answers Hello.
+QStringList candidateDeviceUrls(const PluginManifest &manifest);
+
+// OPENMSO_PYTHON if set, else python3 (python.exe on Windows).
+QString pythonInterpreter();
 
 } // namespace openmso::ocp

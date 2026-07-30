@@ -17,11 +17,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
       | sh -s -- -y --profile minimal --default-toolchain "${RUST_VERSION}"
 ENV PATH=/root/.cargo/bin:$PATH
 
-# Two checkouts, because rust/Cargo.toml reaches the openmso crate by path
-# until openmso-api tags a release. The layout must match that ../.. so the
-# manifest resolves without editing: /src/rust/../../openmso-api.
-COPY openmso /src
-COPY openmso-api /openmso-api
+COPY . /src
 WORKDIR /src
 
 RUN cargo build --release --locked --manifest-path rust/Cargo.toml
@@ -51,7 +47,7 @@ ARG TARGET=x86_64
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libqt6widgets6 libqt6network6 libqt6concurrent6 qt6-qpa-plugins \
+        libqt6widgets6 libqt6concurrent6 qt6-qpa-plugins \
         libnng1 libprotobuf32 \
     && rm -rf /var/lib/apt/lists/*
 

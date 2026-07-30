@@ -1,141 +1,84 @@
 #pragma once
 
-#include "MessageStream.h"
-#include "PluginError.h"
+#include <openmso/client.h>
+
+#include <QObject>
+#include <QString>
+#include <QThread>
+
+#include <atomic>
+#include <memory>
+
 #include "PluginManifest.h"
 
-#include <QJsonObject>
-#include <QObject>
-#include <QPointer>
+Q_DECLARE_METATYPE(openmso::pb::Event)
 
-#include <functional>
-
-class QIODevice;
-class QProcess;
-class QTcpSocket;
 namespace openmso::ocp {
 
-// Frontend-side OCP client. Launches (or connects to) a capture plugin
-// and speaks JSON-RPC 2.0 with line + binary framing (docs/protocol.md).
+// Pulls events off the stream socket so a saturated data pipe never stalls
+// the GUI thread. Lives on its own QThread; every emission is queued.
+class EventReader : public QObject {
+    Q_OBJECT
+public:
+    explicit EventReader(::openmso::EventStream stream);
+
+    void stop() { stop_ = true; }
+
+public slots:
+    void run();
+
+signals:
+    void event(const ::openmso::pb::Event &event);
+    void failed(const QString &what);
+    void finished();
+
+private:
+    ::openmso::EventStream stream_;
+    std::atomic<bool> stop_{false};
+};
+
+// Frontend-side OCP client: a plugin subprocess driven over nng.
 //
-// This is the C++ port of python/openmso/client.py's PluginClient. It
-// is event-driven: the underlying QIODevice (QProcess stdout or
-// QTcpSocket) emits readyRead on the GUI thread, MessageStream parses
-// complete messages, and responses are dispatched to either the
-// synchronous request() caller (via a QEventLoop) or the async
-// callback. Notifications fire as a Qt signal.
-//
-// Threading: all I/O happens on the GUI thread. There is no reader
-// thread; the Python implementation's threading.Event / reader loop
-// maps to QEventLoop + readyRead. This is simpler and avoids
-// cross-thread QIODevice access (which Qt warns against).
-//
-// Lifetime: owns its QProcess (if launched) and QTcpSocket (if
-// connected). Delete the PluginClient or call shutdown() to tear down.
+// Control requests block the calling thread until the plugin replies, which
+// is what a REQ socket is; events arrive as queued signals from EventReader.
 class PluginClient : public QObject {
     Q_OBJECT
 public:
-    using ResponseCb =
-        std::function<void(const QJsonObject &result, PluginError *error)>;
-
-    using NotificationHandler =
-        std::function<void(const QString &method,
-                           const QJsonObject &params,
-                           const QByteArray &payload)>;
-
-    // Spawn a plugin subprocess speaking OCP on its stdio. stderr is
-    // inherited so plugin diagnostics reach the user. Returns nullptr
-    // if the process fails to start.
+    // Null on failure, with `error` set to why.
     static PluginClient *launch(const PluginManifest &manifest,
+                                const QString &device, QString *error,
                                 QObject *parent = nullptr);
-    static PluginClient *launch(const QStringList &argv,
-                                const QString &workingDir = {},
-                                QObject *parent = nullptr);
-
-    // Connect to a plugin listening on TCP. Returns nullptr if the
-    // socket fails to connect.
-    static PluginClient *connectToHost(const QString &host, quint16 port,
-                                      QObject *parent = nullptr);
 
     ~PluginClient() override;
 
-    // Send a request synchronously, wait for the result. Throws
-    // PluginError on JSON-RPC error, plugin exit, or timeout. Default
-    // timeout (60s) matches python/openmso/client.py.
-    QJsonObject request(const QString &method,
-                        const QJsonObject &params = {},
-                        const QByteArray &payload = {},
-                        int timeoutMs = 60000);
+    ::openmso::pb::HelloResult hello(const QString &clientName,
+                                     const QString &clientVersion);
+    ::openmso::pb::Description describe();
+    ::openmso::pb::Config getConfig();
+    ::openmso::pb::Config setConfig(const ::openmso::pb::Config &config);
 
-    // Async variant: returns immediately. The callback runs on the
-    // GUI thread when the response arrives (or on error/EOF).
-    int requestAsync(const QString &method,
-                     const QJsonObject &params,
-                     ResponseCb cb,
-                     const QByteArray &payload = {});
+    // Allocates and returns the capture id.
+    quint64 acquireStart(::openmso::pb::AcquireMode mode);
+    void acquireStop(quint64 captureId);
+    void reset();
 
-    // Fire-and-forget notification (no id, no response expected).
-    void sendNotification(const QString &method,
-                         const QJsonObject &params = {},
-                         const QByteArray &payload = {});
-
-    // Convenience for the common "initialize" handshake.
-    QJsonObject initialize(const QString &clientName =
-                               QStringLiteral("omso"),
-                           const QString &clientVersion =
-                               QStringLiteral("0.1.0"));
-
-    void setNotificationHandler(NotificationHandler h);
-
-    // Send shutdown, close the stream, wait for the process to exit.
-    // Safe to call multiple times. After shutdown, the client is
-    // inert; further requests will throw PluginError(-1, ...).
+    // Stops the reader, asks the plugin to exit, reaps it. Idempotent.
     void shutdown();
 
-    bool isConnected() const;
+    bool isRunning() const;
 
 signals:
-    // Emitted on the GUI thread for every notification received.
-    void notification(QString method, QJsonObject params, QByteArray payload);
-
-    // Emitted when the underlying stream ends (process exit or socket
-    // disconnect). The client is unusable afterwards.
-    void disconnected();
+    void event(const ::openmso::pb::Event &event);
+    void streamFailed(const QString &what);
 
 private:
-    explicit PluginClient(QObject *parent = nullptr);
+    explicit PluginClient(::openmso::CaptureClient client, QObject *parent);
 
-    // Wire readyRead/error/finished of io_ to our slots. io_ must
-    // already be opened.
-    void attach(QIODevice *io);
+    void startReader();
 
-    void onReadyRead();
-    void onAboutToClose();
-    void handleParsedMessage(const QJsonObject &msg,
-                             const QByteArray &payload);
-    void failAllPending(const QString &reason);
-
-    // Serialize + write a message. Returns false on write failure.
-    bool writeMessage(const QJsonObject &msg, const QByteArray &payload);
-
-    QIODevice *io_ = nullptr;
-    QPointer<QProcess> proc_;       // nullptr for TCP clients
-    QPointer<QTcpSocket> sock_;     // nullptr for stdio clients
-
-    MessageStream stream_;
-
-    struct PendingSlot {
-        int id = 0;
-        bool isAsync = false;
-        ResponseCb asyncCb;
-        QJsonObject *syncResult = nullptr;
-        PluginError *syncError = nullptr;
-        QPointer<QObject> loop;     // QEventLoop for sync request()
-        bool *syncGotResponse = nullptr;  // set true on response
-    };
-    QMap<int, PendingSlot> pending_;
-    int nextId_ = 0;
-    NotificationHandler handler_;
+    std::unique_ptr<::openmso::CaptureClient> client_;
+    QThread *thread_ = nullptr;
+    EventReader *reader_ = nullptr;
 };
 
 } // namespace openmso::ocp

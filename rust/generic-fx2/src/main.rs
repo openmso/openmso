@@ -6,407 +6,576 @@
 //! `fx2lafw.c` was consulted as a behavioral reference only; no GPL code is
 //! included. See `docs/fx2-plan/README.md` §3 for the clean-room discipline.
 //!
-//! The fx2lafw firmware blob (GPL-2.0+) is NOT vendored: we read the user's
-//! system-installed blob at runtime and upload it via the Cypress 0xA0
-//! bootloader on every open.
+//! The fx2lafw firmware blob (GPL-2.0+) is NOT vendored: the user's
+//! system-installed blob is read at runtime and uploaded via the Cypress 0xA0
+//! bootloader while answering `Hello`.
 
 mod firmware;
 mod fx2;
 
+use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use serde_json::{json, Map, Value};
+use openmso::encoding::accepts;
+use openmso::proto::{
+    event, stream, trigger, AcquireMode, AcquireStart, AcquireStop, AcquisitionBegin,
+    AcquisitionEnd, Capabilities, CaptureBegin, CaptureEnd, CaptureTrigger, Channel, ChannelConfig,
+    ChannelKind, Config, Description, DeviceConfig, DeviceInfo, DeviceLimits, DoubleSet, Hello,
+    HelloResult, LogicFormat, LogicLimits, PluginInfo, SampleEncoding, State, Stream, TriggerKind,
+    UintRange, UintSet,
+};
+use openmso::server::{self, Args, CaptureServer, Events, StreamSender};
+use openmso::{proto, Reply};
 
-use openmso::server::{self, Ctx, CaptureServer, RpcError, BUSY, DEVICE_ERROR,
-                              INVALID_PARAMS, UNSUPPORTED};
+use fx2::{Fx2, ReadResult, Target, DEFAULT_LIMIT_SAMPLES, DEFAULT_SAMPLERATE, SAMPLE_RATES};
 
-use fx2::{Fx2, ReadResult, SAMPLE_RATES, DEFAULT_LIMIT_SAMPLES, DEFAULT_SAMPLERATE};
-
-const LOGIC_CHANNELS: [&str; 8] = ["D0", "D1", "D2", "D3", "D4", "D5", "D6", "D7"];
-// 8 in-flight URBs × 512-byte HS packets is plenty of headroom for 24 MB/s
-// while keeping latency bounded; matches the queued-transfer recommendation
-// in docs/fx2-plan/README.md §9.
+const LOGIC_CHANNELS: usize = 8;
+/// One byte per sample, bit *i* = D*i* — byte-identical to OCP logic encoding.
+const UNITSIZE: usize = 1;
 const BULK_BUF_SIZE: usize = 4096;
 const BULK_TIMEOUT: Duration = Duration::from_millis(1000);
-const DATA_FRAME_BYTES: usize = 4 * 1024 * 1024;
+/// The device streams without bound, so a single capture needs a ceiling
+/// somewhere; 24 MSa/s fills this in about 20 s.
+const MAX_SAMPLE_DEPTH: u64 = 500_000_000;
 
-fn dev_err(e: impl Into<String>) -> RpcError {
-    RpcError::new(DEVICE_ERROR, e)
+#[derive(Clone, Copy)]
+struct Cfg {
+    samplerate: u32,
+    sample_depth: u64,
 }
 
-fn invalid(msg: impl Into<String>) -> RpcError {
-    RpcError::new(INVALID_PARAMS, msg)
+impl Default for Cfg {
+    fn default() -> Self {
+        Cfg { samplerate: DEFAULT_SAMPLERATE, sample_depth: DEFAULT_LIMIT_SAMPLES }
+    }
 }
 
-fn device_entry(bus: u8, addr: u8, vid: u16, _pid: u16) -> Value {
-    let conn = format!("usb://{bus:03}-{addr:03}");
-    json!({
-        "device_id": conn,
-        "vendor": format!("0x{vid:04x}"),
-        "model": "fx2lafw",
-        "serial": null,
-        "connection": conn,
-        "firmware": null,
-    })
+impl Cfg {
+    fn to_config(self) -> Config {
+        Config {
+            device: Some(DeviceConfig {
+                samplerate: Some(self.samplerate as f64),
+                sample_depth: Some(self.sample_depth),
+                trigger: Some(proto::Trigger {
+                    trigger: Some(trigger::Trigger::None(proto::Empty {})),
+                    position: 0.0,
+                }),
+                averaging: Some(1),
+                capture_span: Some(self.sample_depth as f64 / self.samplerate as f64),
+            }),
+            // The device always samples all eight bits into one packed stream,
+            // so a channel cannot be switched off without renumbering the bits
+            // underneath a decoder.
+            channels: (0..LOGIC_CHANNELS)
+                .map(|i| ChannelConfig {
+                    id: format!("D{i}"),
+                    enabled: Some(true),
+                    ..Default::default()
+                })
+                .collect(),
+            vendor: Default::default(),
+        }
+    }
+
+    fn apply(&mut self, config: &Config) -> Reply<()> {
+        if let Some(device) = &config.device {
+            self.apply_device(device)?;
+        }
+        for channel in &config.channels {
+            let index = channel
+                .id
+                .strip_prefix('D')
+                .and_then(|n| n.parse::<usize>().ok())
+                .filter(|i| *i < LOGIC_CHANNELS);
+            if index.is_none() {
+                return Err(proto::Error::invalid(format!("no channel {:?}", channel.id)));
+            }
+        }
+        if let Some((key, _)) = config.vendor.iter().next() {
+            return Err(proto::Error::invalid(format!("no vendor option {key:?}")));
+        }
+        Ok(())
+    }
+
+    fn apply_device(&mut self, device: &DeviceConfig) -> Reply<()> {
+        if let Some(rate) = device.samplerate {
+            if !(rate.is_finite() && rate > 0.0) {
+                return Err(proto::Error::invalid("samplerate must be positive"));
+            }
+            // Snapped rather than refused: the ladder is what the device's
+            // IFCLK divider can actually produce, and set_config reports back
+            // what it settled on.
+            self.samplerate = snap_samplerate(rate);
+        }
+        if let Some(depth) = device.sample_depth {
+            if depth == 0 || depth > MAX_SAMPLE_DEPTH {
+                return Err(proto::Error::invalid(format!(
+                    "sample_depth must be 1..{MAX_SAMPLE_DEPTH}"
+                )));
+            }
+            self.sample_depth = depth;
+        }
+        if let Some(trigger) = &device.trigger {
+            if !matches!(trigger.trigger, None | Some(trigger::Trigger::None(_))) {
+                return Err(proto::Error::unsupported("fx2lafw has no hardware trigger"));
+            }
+        }
+        match device.averaging {
+            None | Some(1) => Ok(()),
+            Some(_) => Err(proto::Error::unsupported("averaging")),
+        }
+    }
+}
+
+fn snap_samplerate(rate: f64) -> u32 {
+    SAMPLE_RATES
+        .iter()
+        .copied()
+        .min_by(|a, b| {
+            let (da, db) = ((*a as f64 - rate).abs(), (*b as f64 - rate).abs());
+            da.partial_cmp(&db).expect("rate ladder is finite")
+        })
+        .unwrap_or(DEFAULT_SAMPLERATE)
 }
 
 type Dev = Arc<Mutex<Option<Fx2>>>;
 
 struct Fx2Plugin {
+    device_url: String,
     dev: Dev,
-    device: Option<Value>,
-    capture_id: u64,
+    cfg: Cfg,
+    encodings: Vec<i32>,
     stop: Arc<AtomicBool>,
-    acq: Option<thread::JoinHandle<()>>,
-    // Plugin-side config (samplerate snaps to nearest legal ladder value).
-    samplerate: u32,
-    limit_samples: u64,
+    acquisition: Option<JoinHandle<()>>,
 }
 
 impl Fx2Plugin {
-    fn new() -> Self {
+    fn new(device_url: String) -> Self {
         Fx2Plugin {
+            device_url,
             dev: Arc::new(Mutex::new(None)),
-            device: None,
-            capture_id: 0,
+            cfg: Cfg::default(),
+            encodings: Vec::new(),
             stop: Arc::new(AtomicBool::new(false)),
-            acq: None,
-            samplerate: DEFAULT_SAMPLERATE,
-            limit_samples: DEFAULT_LIMIT_SAMPLES,
+            acquisition: None,
         }
     }
 
-    fn require_open(&self) -> Result<(), RpcError> {
-        if self.dev.lock().unwrap().is_some() {
-            Ok(())
-        } else {
-            Err(dev_err("no device open"))
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // scan / open / close
-    // ------------------------------------------------------------------
-    fn scan(&mut self, _params: &Value, ctx: &Arc<Ctx>) -> Result<Value, RpcError> {
-        let mut devices = Vec::new();
-        for d in fx2::list_known() {
-            devices.push(device_entry(d.bus, d.address, d.vid, d.pid));
-        }
-        if devices.is_empty() {
-            ctx.log("info", "no fx2lafw devices found (expected 0925:3881)");
-        }
-        Ok(json!({"devices": devices}))
-    }
-
-    fn open(&mut self, params: &Value) -> Result<Value, RpcError> {
-        if self.dev.lock().unwrap().is_some() {
-            return Err(RpcError::new(BUSY, "device already open"));
-        }
-        // Parse "usb://BBB-AAA" (zero-padded) from scan's device_id; fall back
-        // to "any known device" if absent (defensive — frontends should pass
-        // the id they got from scan).
-        let (bus, addr) = params.get("device_id").and_then(Value::as_str)
-            .and_then(|s| s.strip_prefix("usb://"))
-            .and_then(|s| s.split_once('-'))
-            .and_then(|(b, a)| {
-                let b = u8::from_str_radix(b, 10).ok()?;
-                let a = u8::from_str_radix(a, 10).ok()?;
-                Some((b, a))
-            })
-            .unwrap_or((0, 0));
-        let dev = if bus == 0 && addr == 0 {
-            Fx2::open().map_err(dev_err)?
-        } else {
-            Fx2::open_target(bus, addr).map_err(dev_err)?
-        };
-        let entry = device_entry(dev.bus, dev.address, fx2::VID_SALEAE,
-                                  fx2::PID_SALEAE_LOGIC);
-        self.device = Some(entry.clone());
-        *self.dev.lock().unwrap() = Some(dev);
-        Ok(json!({"device": entry}))
-    }
-
-    fn release(&mut self) {
+    fn join_previous(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        if let Some(handle) = self.acq.take() {
-            let _ = handle.join();
+        if let Some(handle) = self.acquisition.take() {
+            handle.join().ok();
         }
-        if let Some(mut dev) = self.dev.lock().unwrap().take() {
-            let _ = dev.stop();
-        }
-        self.device = None;
     }
 
-    // ------------------------------------------------------------------
-    // describe / config
-    // ------------------------------------------------------------------
-    fn describe(&self) -> Result<Value, RpcError> {
-        self.require_open()?;
-        let device = self.device.clone()
-            .ok_or_else(|| dev_err("describe: no device open"))?;
-        let channels: Vec<Value> = LOGIC_CHANNELS.iter().enumerate()
-            .map(|(i, ch)| json!({"id": ch, "kind": "logic",
-                                   "name": format!("D{i}"), "index": i}))
-            .collect();
-        let rate_choices: Vec<Value> = SAMPLE_RATES.iter()
-            .map(|&r| json!(r)).collect();
-        let config = json!({
-            "samplerate": {"scope": "device", "type": "number", "unit": "Sa/s",
-                           "choices": rate_choices, "get": true, "set": true},
-            "limit_samples": {"scope": "device", "type": "number",
-                              "get": true, "set": true},
-            "enabled": {"scope": "logic", "type": "bool",
-                        "get": true, "set": true},
-        });
-        Ok(json!({"device": device, "channels": channels, "config": config}))
-    }
+    /// The work `Hello` does, minus the socket a live plugin has by then.
+    fn connect(&mut self, req: &Hello) -> Reply<HelloResult> {
+        let target = Target::parse(&self.device_url).map_err(proto::Error::device)?;
+        // Where the firmware upload happens, so a device that is missing or
+        // has no blob installed comes back as an Error on a live connection.
+        let device = Fx2::open(&target).map_err(proto::Error::device)?;
 
-    fn config_get(&mut self, params: &Value) -> Result<Value, RpcError> {
-        self.require_open()?;
-        let channel = params.get("channel").and_then(Value::as_str);
-        if channel.is_some() {
-            // Per-channel: only `enabled` is meaningful for fx2lafw (the
-            // device always samples all 8 bits; disabling is a host-side
-            // filter). Report all channels enabled.
-            let mut values = Map::new();
-            values.insert("enabled".into(), json!(true));
-            return Ok(json!({"values": values}));
-        }
-        let requested: Option<Vec<String>> = params.get("keys")
-            .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect());
-        let default_keys: &[&str] = &["samplerate", "limit_samples"];
-        let keys: Vec<String> = requested
-            .unwrap_or_else(|| default_keys.iter().map(|s| s.to_string()).collect());
-        let mut values = Map::new();
-        for key in keys {
-            let v = match key.as_str() {
-                "samplerate" => json!(self.samplerate),
-                "limit_samples" => json!(self.limit_samples),
-                _ => return Err(invalid(format!("unknown key {key:?} in scope"))),
-            };
-            values.insert(key, v);
-        }
-        Ok(json!({"values": values}))
-    }
-
-    fn config_set(&mut self, params: &Value) -> Result<Value, RpcError> {
-        self.require_open()?;
-        let values = params.get("values").and_then(Value::as_object)
-            .cloned().unwrap_or_default();
-        let mut applied = Map::new();
-        for (key, value) in values {
-            let v = match key.as_str() {
-                "samplerate" => {
-                    let r = value.as_u64()
-                        .ok_or_else(|| invalid("samplerate must be a number"))?;
-                    let r = snap_samplerate(r as u32);
-                    self.samplerate = r;
-                    json!(r)
-                }
-                "limit_samples" => {
-                    let n = value.as_u64()
-                        .ok_or_else(|| invalid("limit_samples must be a number"))?;
-                    self.limit_samples = n;
-                    json!(n)
-                }
-                _ => return Err(invalid(format!("unknown key {key:?} in scope"))),
-            };
-            applied.insert(key, v);
-        }
-        Ok(json!({"applied": applied}))
-    }
-
-    // ------------------------------------------------------------------
-    // acquisition
-    // ------------------------------------------------------------------
-    fn acquire_start(&mut self, params: &Value, ctx: &Arc<Ctx>) -> Result<Value, RpcError> {
-        self.require_open()?;
-        if let Some(handle) = &self.acq {
-            if !handle.is_finished() {
-                return Err(RpcError::new(BUSY, "acquisition already running"));
-            }
-        }
-        let mode = params.get("mode").and_then(Value::as_str).unwrap_or("single");
-        if mode != "single" && mode != "continuous" {
-            return Err(RpcError::new(UNSUPPORTED, format!("mode {mode:?} not supported")));
-        }
-        if mode == "snapshot" {
-            return Err(RpcError::new(UNSUPPORTED,
-                "snapshot not supported (fx2lafw has no on-device memory)"));
-        }
-        self.capture_id += 1;
-        let cid = self.capture_id;
-        self.stop.store(false, Ordering::SeqCst);
-        let (dev, stop, ctx, mode, rate, limit) = (
-            self.dev.clone(), self.stop.clone(), ctx.clone(), mode.to_string(),
-            self.samplerate, self.limit_samples,
-        );
-        self.acq = Some(thread::spawn(move || {
-            if let Err(e) = acquire_inner(&dev, &stop, &ctx, cid, &mode, rate, limit) {
-                ctx.notify("capture.end",
-                           json!({"capture_id": cid, "ok": false, "error": e}), None);
-            }
-        }));
-        Ok(json!({"capture_id": cid}))
-    }
-}
-
-fn snap_samplerate(r: u32) -> u32 {
-    // Snap to the nearest legal ladder value (matches siglent-sds1000xe coercion).
-    SAMPLE_RATES.iter().copied()
-        .min_by_key(|s| (*s as i64 - r as i64).abs())
-        .unwrap_or(DEFAULT_SAMPLERATE)
-}
-// ------------------------------------------------------------------
-// acquisition worker
-// ------------------------------------------------------------------
-
-fn acquire_inner(dev: &Dev, stop: &AtomicBool, ctx: &Ctx, cid: u64, mode: &str,
-                 rate: u32, limit: u64) -> Result<(), String> {
-    // Configure + start streaming on the device. We keep the lock only for
-    // the setup; the bulk-read loop takes the lock per read so the serve
-    // loop can still observe `acquire.stop` and we don't deadlock if a
-    // config.get arrives mid-stream.
-    {
-        let mut guard = dev.lock().unwrap();
-        let Some(d) = guard.as_mut() else { return Err("no device open".into()) };
-        d.start(rate)?;
-    }
-
-    ctx.notify("event.status", json!({"state": "armed"}), None);
-    ctx.notify("capture.begin", json!({
-        "capture_id": cid, "samplerate": rate, "t0": 0,
-        "streams": [
-            {"stream": 0, "kind": "logic",
-             "channels": LOGIC_CHANNELS.to_vec(),
-             "encoding": {"unitsize": 1}}
-        ]
-    }), None);
-    ctx.notify("event.status", json!({"state": "transferring"}), None);
-
-    let mut first_sample: u64 = 0;
-    let mut seq: u64 = 0;
-    let mut collected: u64 = 0;
-    let mps = {
-        let guard = dev.lock().unwrap();
-        guard.as_ref().map(|d| d.max_packet_size()).unwrap_or(512)
-    };
-    let buf_size = BULK_BUF_SIZE.max(mps).max(512);
-    // Round up to a multiple of max_packet_size (nusb requires this for IN).
-    let buf_size = (buf_size + mps - 1) / mps * mps;
-
-    loop {
-        if stop.load(Ordering::SeqCst) { break; }
-
-        let result = {
-            let mut guard = dev.lock().unwrap();
-            match guard.as_mut() {
-                Some(d) => d.read_blocking(buf_size, BULK_TIMEOUT),
-                None => return Err("device closed during acquisition".into()),
-            }
-        }?;
-
-        let data = match result {
-            ReadResult::Data(b) => b,
-            ReadResult::Timeout => continue,
-            ReadResult::Stall => continue,
+        let (major, minor) = device.fw_version;
+        let info = DeviceInfo {
+            vendor: format!("{:04x}", target.vid),
+            model: "fx2lafw".to_string(),
+            serial: device.serial.clone(),
+            firmware_version: format!("{major}.{minor}"),
         };
-        if data.is_empty() { continue; }
+        *self.dev.lock().unwrap() = Some(device);
 
-        // In single mode, truncate the final chunk to hit exactly `limit`.
-        let n: u64;
-        let mut data = data;
-        if mode == "single" && collected + data.len() as u64 > limit {
-            let keep = (limit - collected) as usize;
-            data.truncate(keep);
-            n = keep as u64;
-        } else {
-            n = data.len() as u64;
-        }
-        if data.is_empty() { break; }
-
-        // Frame into <= DATA_FRAME_BYTES chunks; `first_sample` tracks the
-        // absolute sample index across the whole capture.
-        let mut off = 0;
-        while off < data.len() {
-            let part = &data[off..data.len().min(off + DATA_FRAME_BYTES)];
-            ctx.notify("capture.data", json!({
-                "capture_id": cid, "stream": 0, "seq": seq,
-                "first_sample": first_sample + off as u64,
-                "nsamples": part.len(),
-            }), Some(part));
-            seq += 1;
-            off += part.len();
-        }
-        first_sample += n;
-        collected += n;
-
-        if mode == "single" && collected >= limit {
-            break;
-        }
+        let result = server::hello_result(
+            req,
+            PluginInfo {
+                name: "generic-fx2".to_string(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                vendor: "OpenMSO".to_string(),
+                description: "Cypress FX2 (fx2lafw) logic analyzers".to_string(),
+            },
+            Capabilities {
+                // No snapshot: fx2lafw streams and has no on-device memory to
+                // hand over.
+                modes: vec![
+                    AcquireMode::AcquireSingle as i32,
+                    AcquireMode::AcquireContinuous as i32,
+                ],
+                trigger_kinds: vec![TriggerKind::TriggerNone as i32],
+            },
+            info,
+        );
+        self.encodings = result.encodings.clone();
+        Ok(result)
     }
-
-    // Stop streaming + clean up the endpoint. fx2lafw has no stop command;
-    // cancelling URBs + clear_halt is the documented stop.
-    {
-        let mut guard = dev.lock().unwrap();
-        if let Some(d) = guard.as_mut() {
-            let _ = d.stop();
-        }
-    }
-
-    let aborted = stop.load(Ordering::SeqCst);
-    let mut end = json!({"capture_id": cid, "ok": !aborted});
-    if aborted {
-        end["error"] = json!("aborted");
-    }
-    ctx.notify("capture.end", end, None);
-    ctx.notify("event.status", json!({"state": "idle"}), None);
-    Ok(())
 }
 
 impl CaptureServer for Fx2Plugin {
-    fn info(&self) -> Value {
-        json!({"name": "generic-fx2", "version": "0.1.0", "vendor": "OpenMSO",
-               "description": "Cypress FX2 (fx2lafw) logic analyzers"})
+    fn hello(&mut self, req: &Hello, _events: &Arc<Events>) -> Reply<HelloResult> {
+        self.connect(req)
     }
 
-    fn capabilities(&self) -> Value {
-        json!({"scan": true, "modes": ["continuous", "single"],
-               "raw": false, "trigger_forms": []})
+    fn describe(&mut self) -> Reply<Description> {
+        Ok(Description {
+            channels: (0..LOGIC_CHANNELS)
+                .map(|i| Channel {
+                    id: format!("D{i}"),
+                    name: format!("D{i}"),
+                    kind: ChannelKind::ChannelLogic as i32,
+                    index: i as u32,
+                    ..Default::default()
+                })
+                .collect(),
+            limits: Some(DeviceLimits {
+                // Discrete steps, not a range: these are the only rates the
+                // IFCLK divider produces.
+                samplerate: Some(DoubleSet {
+                    values: SAMPLE_RATES.iter().map(|r| *r as f64).collect(),
+                    ..Default::default()
+                }),
+                sample_depth: Some(UintSet {
+                    range: Some(UintRange { min: 1, max: MAX_SAMPLE_DEPTH, step: 1 }),
+                    ..Default::default()
+                }),
+                samplerate_settable: true,
+                sample_depth_settable: true,
+                max_enabled_channels: LOGIC_CHANNELS as u32,
+                ..Default::default()
+            }),
+            analog: None,
+            // Fixed threshold, which an empty set is how to say.
+            logic: Some(LogicLimits::default()),
+            vendor_options: vec![],
+        })
     }
 
-    fn handle(&mut self, method: &str, params: &Value, _payload: Option<Vec<u8>>,
-              ctx: &Arc<Ctx>) -> Result<Value, RpcError> {
-        match method {
-            "scan" => self.scan(params, ctx),
-            "open" => self.open(params),
-            "close" => {
-                self.release();
-                Ok(json!({}))
+    fn get_config(&mut self) -> Reply<Config> {
+        Ok(self.cfg.to_config())
+    }
+
+    fn set_config(&mut self, config: &Config) -> Reply<Config> {
+        // Applied to a copy, so a request that fails half way leaves the
+        // device on the settings it had.
+        let mut cfg = self.cfg;
+        cfg.apply(config)?;
+        self.cfg = cfg;
+        Ok(cfg.to_config())
+    }
+
+    fn acquire_start(&mut self, req: &AcquireStart, events: &Arc<Events>) -> Reply<()> {
+        self.join_previous();
+        let mode = AcquireMode::try_from(req.mode).unwrap_or(AcquireMode::Unspecified);
+        match mode {
+            AcquireMode::AcquireSingle | AcquireMode::AcquireContinuous => {}
+            AcquireMode::AcquireSnapshot => {
+                return Err(proto::Error::unsupported(
+                    "snapshot: fx2lafw has no on-device memory",
+                ))
             }
-            "describe" => self.describe(),
-            "config.get" => self.config_get(params),
-            "config.set" => self.config_set(params),
-            "acquire.start" => self.acquire_start(params, ctx),
-            "acquire.stop" => {
-                self.stop.store(true, Ordering::SeqCst);
-                Ok(json!({}))
-            }
-            _ => Err(RpcError::method_not_found(method)),
+            AcquireMode::Unspecified => return Err(proto::Error::invalid("no acquire mode")),
         }
+
+        // An idle bus costs almost nothing run-length encoded, and a logic
+        // analyzer's bus is mostly idle.
+        let encoding = if accepts(&self.encodings, SampleEncoding::Transition) {
+            SampleEncoding::Transition
+        } else {
+            SampleEncoding::Packed
+        };
+
+        // Configure and start the device on the control loop, so a device
+        // that refuses fails the request rather than a CaptureEnd.
+        {
+            let mut guard = self.dev.lock().unwrap();
+            let device = guard
+                .as_mut()
+                .ok_or_else(|| proto::Error::device("no device open"))?;
+            device.start(self.cfg.samplerate).map_err(proto::Error::device)?;
+        }
+
+        let stop = Arc::new(AtomicBool::new(false));
+        self.stop = stop.clone();
+        let capture =
+            Capture { capture_id: req.capture_id, mode, cfg: self.cfg, encoding };
+        let (dev, events) = (self.dev.clone(), events.clone());
+        self.acquisition = Some(thread::spawn(move || {
+            let error = capture
+                .run(&dev, &events, &stop)
+                .err()
+                .map(|e| proto::Error::device(e.to_string()));
+            // Whatever happened, the device stops streaming and the frontend
+            // gets its CaptureEnd.
+            if let Some(device) = dev.lock().unwrap().as_mut() {
+                device.stop().ok();
+            }
+            events
+                .send(event::Event::CaptureEnd(CaptureEnd {
+                    capture_id: capture.capture_id,
+                    error,
+                }))
+                .ok();
+        }));
+        Ok(())
     }
 
-    fn on_disconnect(&mut self) {
-        self.release();
+    fn acquire_stop(&mut self, _req: &AcquireStop) -> Reply<()> {
+        self.stop.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn reset(&mut self) -> Reply<()> {
+        self.join_previous();
+        Ok(())
+    }
+
+    fn shutdown(&mut self) {
+        self.join_previous();
+        if let Some(device) = self.dev.lock().unwrap().as_mut() {
+            device.stop().ok();
+        }
     }
 }
 
-fn main() {
-    let mut plugin = Fx2Plugin::new();
-    server::run_from_argv(&mut plugin);
+struct Capture {
+    capture_id: u64,
+    mode: AcquireMode,
+    cfg: Cfg,
+    encoding: SampleEncoding,
+}
+
+impl Capture {
+    fn run(&self, dev: &Dev, events: &Arc<Events>, stop: &AtomicBool) -> openmso::Result<()> {
+        events.send(event::Event::CaptureBegin(CaptureBegin {
+            capture_id: self.capture_id,
+            samplerate: self.cfg.samplerate as f64,
+            streams: vec![Stream {
+                id: 0,
+                channels: (0..LOGIC_CHANNELS).map(|i| format!("D{i}")).collect(),
+                format: Some(stream::Format::Logic(LogicFormat { unitsize: UNITSIZE as u32 })),
+            }],
+        }))?;
+        events.status(State::Armed, "")?;
+
+        // One acquisition either way: continuous is a streaming device's single
+        // unbounded run, not a series of frames, because there is nothing to
+        // re-arm.
+        let sample_count = match self.mode {
+            AcquireMode::AcquireContinuous => 0,
+            _ => self.cfg.sample_depth,
+        };
+        events.send(event::Event::AcquisitionBegin(AcquisitionBegin {
+            capture_id: self.capture_id,
+            acquisition: 0,
+            t0: 0.0,
+            sample_count,
+        }))?;
+        // A free-running device triggers on sample 0 the moment it is armed.
+        events.status(State::Triggered, "")?;
+        events.send(event::Event::Trigger(CaptureTrigger {
+            capture_id: self.capture_id,
+            acquisition: 0,
+            sample: 0,
+        }))?;
+        events.status(State::Transferring, "")?;
+
+        let collected = self.transfer(dev, events, stop)?;
+
+        events.send(event::Event::AcquisitionEnd(AcquisitionEnd {
+            capture_id: self.capture_id,
+            acquisition: 0,
+            // fx2lafw gives the host no overrun signal, so a gap would be a
+            // guess. Reporting none is the honest answer.
+            dropped_samples: 0,
+        }))?;
+        let _ = collected;
+        events.status(State::Idle, "")
+    }
+
+    fn transfer(&self, dev: &Dev, events: &Arc<Events>, stop: &AtomicBool) -> openmso::Result<u64> {
+        let mut sender = StreamSender::new(self.capture_id, 0, 0, UNITSIZE);
+        if self.encoding == SampleEncoding::Transition {
+            sender = sender.transition();
+        }
+
+        let mps = dev
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|d| d.max_packet_size())
+            .unwrap_or(512);
+        // nusb requires IN buffers to be a multiple of the max packet size.
+        let buf_size = BULK_BUF_SIZE.max(mps).div_ceil(mps) * mps;
+
+        let mut collected: u64 = 0;
+        let single = self.mode != AcquireMode::AcquireContinuous;
+        while !stop.load(Ordering::SeqCst) {
+            let read = {
+                let mut guard = dev.lock().unwrap();
+                let device = guard.as_mut().ok_or_else(|| {
+                    openmso::Error::Protocol("device closed during acquisition".into())
+                })?;
+                device
+                    .read_blocking(buf_size, BULK_TIMEOUT)
+                    .map_err(openmso::Error::Protocol)?
+            };
+
+            let mut data = match read {
+                ReadResult::Data(data) => data,
+                ReadResult::Timeout | ReadResult::Stall => continue,
+            };
+            if data.is_empty() {
+                continue;
+            }
+
+            if single && collected + data.len() as u64 >= self.cfg.sample_depth {
+                data.truncate((self.cfg.sample_depth - collected) as usize);
+            }
+            collected += data.len() as u64;
+            sender.send(events, &data)?;
+
+            if single && collected >= self.cfg.sample_depth {
+                break;
+            }
+        }
+        Ok(collected)
+    }
+}
+
+fn main() -> ExitCode {
+    let args = match Args::from_env() {
+        Ok(args) => args,
+        Err(e) => {
+            eprintln!("generic-fx2: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    // Ties this process's life to the frontend's: its death closes our stdin.
+    server::exit_on_stdin_eof();
+    let mut plugin = Fx2Plugin::new(args.device.clone());
+    match server::serve(&args, &mut plugin) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("generic-fx2: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rates_snap_to_the_ladder_the_divider_can_produce() {
+        assert_eq!(snap_samplerate(1e6), 1_000_000);
+        assert_eq!(snap_samplerate(1.1e6), 1_000_000);
+        assert_eq!(snap_samplerate(1e9), 24_000_000, "clamps to the top step");
+        assert_eq!(snap_samplerate(1.0), 20_000, "clamps to the bottom step");
+    }
+
+    #[test]
+    fn config_round_trips_and_derives_capture_span() {
+        let cfg = Cfg { samplerate: 1_000_000, sample_depth: 500_000 };
+        let device = cfg.to_config().device.unwrap();
+        assert_eq!(device.samplerate, Some(1e6));
+        assert_eq!(device.sample_depth, Some(500_000));
+        assert_eq!(device.capture_span, Some(0.5));
+    }
+
+    #[test]
+    fn a_sparse_set_config_leaves_everything_else_alone() {
+        let mut cfg = Cfg::default();
+        cfg.apply(&Config {
+            device: Some(DeviceConfig { sample_depth: Some(4096), ..Default::default() }),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(cfg.sample_depth, 4096);
+        assert_eq!(cfg.samplerate, Cfg::default().samplerate);
+    }
+
+    #[test]
+    fn an_unachievable_rate_is_snapped_rather_than_refused() {
+        let mut cfg = Cfg::default();
+        cfg.apply(&Config {
+            device: Some(DeviceConfig { samplerate: Some(7.0), ..Default::default() }),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(cfg.samplerate, 20_000);
+    }
+
+    #[test]
+    fn what_the_device_cannot_do_is_refused_by_code() {
+        let refuse = |config: Config| {
+            let code = Cfg::default().apply(&config).unwrap_err().code;
+            proto::ErrorCode::try_from(code).unwrap()
+        };
+        let device = |device: DeviceConfig| Config { device: Some(device), ..Default::default() };
+
+        assert_eq!(
+            refuse(device(DeviceConfig { samplerate: Some(0.0), ..Default::default() })),
+            proto::ErrorCode::ErrorInvalidRequest
+        );
+        assert_eq!(
+            refuse(device(DeviceConfig { sample_depth: Some(0), ..Default::default() })),
+            proto::ErrorCode::ErrorInvalidRequest
+        );
+        assert_eq!(
+            refuse(device(DeviceConfig {
+                sample_depth: Some(MAX_SAMPLE_DEPTH + 1),
+                ..Default::default()
+            })),
+            proto::ErrorCode::ErrorInvalidRequest
+        );
+        assert_eq!(
+            refuse(device(DeviceConfig { averaging: Some(8), ..Default::default() })),
+            proto::ErrorCode::ErrorUnsupported
+        );
+        // No hardware trigger, so asking for one is refused rather than
+        // silently free-running.
+        assert_eq!(
+            refuse(device(DeviceConfig {
+                trigger: Some(proto::Trigger {
+                    trigger: Some(trigger::Trigger::Edge(proto::EdgeTrigger::default())),
+                    position: 0.5,
+                }),
+                ..Default::default()
+            })),
+            proto::ErrorCode::ErrorUnsupported
+        );
+        assert_eq!(
+            refuse(Config {
+                channels: vec![ChannelConfig { id: "D9".into(), ..Default::default() }],
+                ..Default::default()
+            }),
+            proto::ErrorCode::ErrorInvalidRequest
+        );
+    }
+
+    #[test]
+    fn a_device_url_for_another_plugin_fails_the_handshake() {
+        for url in ["demo://0", "tcp://192.168.1.155:5025"] {
+            let code = Fx2Plugin::new(url.to_string())
+                .connect(&Hello::default())
+                .unwrap_err()
+                .code;
+            assert_eq!(
+                proto::ErrorCode::try_from(code).unwrap(),
+                proto::ErrorCode::ErrorDevice,
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_usb_url_naming_absent_hardware_fails_on_a_live_connection() {
+        // Not a dead process and a line on stderr: a normal Error, in reply.
+        let code = Fx2Plugin::new("usb://dead:beef".to_string())
+            .connect(&Hello::default())
+            .unwrap_err()
+            .code;
+        assert_eq!(proto::ErrorCode::try_from(code).unwrap(), proto::ErrorCode::ErrorDevice);
+    }
 }

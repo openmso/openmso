@@ -1,24 +1,53 @@
 #include "PluginManifest.h"
 
 #include <QDir>
-#include <QDirIterator>
-#include <QFile>
 #include <QFileInfo>
-#include <QJsonArray>
-#include <QJsonDocument>
-#include <QJsonObject>
 #include <QProcessEnvironment>
-#include <QStandardPaths>
 
 namespace openmso::ocp {
 
 namespace {
 
-QString defaultPython()
+PluginManifest fromDir(const QDir &dir)
+{
+    PluginManifest out;
+    try {
+        const auto message =
+            ::openmso::manifest::load(dir.absolutePath().toStdString());
+        const auto argv = ::openmso::manifest::resolveArgv(
+            message, dir.absolutePath().toStdString(),
+            pythonInterpreter().toStdString());
+
+        out.message = message;
+        out.name = QString::fromStdString(message.name());
+        out.description = QString::fromStdString(message.description());
+        out.pluginDir = dir.absolutePath();
+        for (const auto &token : argv)
+            out.argv.append(QString::fromStdString(token));
+        for (const auto &scheme : message.url_schemes())
+            out.urlSchemes.append(QString::fromStdString(scheme));
+    } catch (const ::openmso::Error &e) {
+        qWarning("plugin manifest in %s: %s",
+                 qUtf8Printable(dir.absolutePath()), e.what());
+        return PluginManifest();
+    }
+
+    if (out.argv.isEmpty()) {
+        qWarning("plugin manifest in %s has no run argv",
+                 qUtf8Printable(dir.absolutePath()));
+        return PluginManifest();
+    }
+    return out;
+}
+
+} // namespace
+
+QString pythonInterpreter()
 {
     const auto env = QProcessEnvironment::systemEnvironment();
-    if (env.contains(QStringLiteral("OPENMSO_PYTHON")))
-        return env.value(QStringLiteral("OPENMSO_PYTHON"));
+    const QString override = env.value(QStringLiteral("OPENMSO_PYTHON"));
+    if (!override.isEmpty())
+        return override;
 #ifdef Q_OS_WIN
     return QStringLiteral("python.exe");
 #else
@@ -26,86 +55,47 @@ QString defaultPython()
 #endif
 }
 
-// Apply the same "relative paths resolve against the plugin dir" rule
-// as python/openmso/client.py:find_plugin. A token is considered a
-// path if it contains a separator or ends with .py; plain flags pass
-// through unchanged.
-QString resolveArg(const QString &token, const QString &pluginDir)
+QList<PluginManifest> findPlugins(const QString &pluginsDir)
 {
-    if (token == QStringLiteral("{python}"))
-        return defaultPython();
-    if (token.contains(QDir::separator()) || token.endsWith(QStringLiteral(".py"))
-        || token.contains('/')) {
-        QFileInfo fi(token);
-        if (fi.isAbsolute())
-            return QDir::cleanPath(token);
-        return QDir::cleanPath(QDir(pluginDir).absoluteFilePath(token));
+    QList<PluginManifest> out;
+    QDir root(pluginsDir);
+    if (!root.exists())
+        return out;
+
+    const auto entries =
+        root.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+    for (const QString &entry : entries) {
+        QDir dir(root.filePath(entry));
+        if (!QFileInfo::exists(dir.filePath(
+                QString::fromLatin1(::openmso::manifest::FILENAME))))
+            continue;
+        PluginManifest m = fromDir(dir);
+        if (!m.isNull())
+            out.append(m);
     }
-    return token;
-}
-
-} // namespace
-
-QStringList expandPython(const QStringList &argv, const QString &pluginDir)
-{
-    QStringList out;
-    out.reserve(argv.size());
-    for (const auto &a : argv)
-        out.append(resolveArg(a, pluginDir));
     return out;
 }
 
 PluginManifest findPlugin(const QString &pluginsDir, const QString &name)
 {
-    PluginManifest m;
-    const QString dir = QDir(pluginsDir).absoluteFilePath(name);
-    const QString manifestPath = QDir(dir).absoluteFilePath(QStringLiteral("plugin.json"));
-    QFile f(manifestPath);
-    if (!f.open(QIODevice::ReadOnly)) {
-        qWarning("findPlugin: cannot open %s", qPrintable(manifestPath));
-        return m;
+    for (const auto &m : findPlugins(pluginsDir)) {
+        if (m.name == name)
+            return m;
     }
-    QJsonParseError err;
-    auto doc = QJsonDocument::fromJson(f.readAll(), &err);
-    if (err.error != QJsonParseError::NoError || !doc.isObject()) {
-        qWarning("findPlugin: bad JSON in %s: %s",
-                 qPrintable(manifestPath), qPrintable(err.errorString()));
-        return m;
-    }
-    const auto obj = doc.object();
-    const auto run = obj.value(QStringLiteral("run")).toArray();
-    if (run.isEmpty()) {
-        qWarning("findPlugin: %s has no \"run\" array", qPrintable(manifestPath));
-        return m;
-    }
-
-    m.name = obj.value(QStringLiteral("name")).toString(name);
-    m.description = obj.value(QStringLiteral("description")).toString();
-    m.pluginDir = dir;
-    QStringList raw;
-    raw.reserve(run.size());
-    for (const auto &v : run)
-        raw.append(v.toString());
-    m.argv = expandPython(raw, dir);
-    return m;
+    return PluginManifest();
 }
 
-QList<PluginManifest> findPlugins(const QString &pluginsDir)
+QStringList candidateDeviceUrls(const PluginManifest &manifest)
 {
-    QList<PluginManifest> out;
-    QDirIterator it(pluginsDir, QDir::Dirs | QDir::NoDotAndDotDot);
-    while (it.hasNext()) {
-        it.next();
-        const QString name = it.fileName();
-        auto m = findPlugin(pluginsDir, name);
-        if (!m.name.isEmpty() && !m.argv.isEmpty())
-            out.append(std::move(m));
+    QStringList urls;
+    if (manifest.urlSchemes.contains(QStringLiteral("demo")))
+        urls << QStringLiteral("demo://0");
+
+    if (manifest.urlSchemes.contains(QStringLiteral("usb"))) {
+        for (const auto &usbId : manifest.message.usb_ids())
+            urls << QStringLiteral("usb://") + QString::fromStdString(usbId.id());
     }
-    std::sort(out.begin(), out.end(),
-              [](const PluginManifest &a, const PluginManifest &b) {
-                  return a.name.compare(b.name, Qt::CaseInsensitive) < 0;
-              });
-    return out;
+    return urls;
 }
 
 } // namespace openmso::ocp

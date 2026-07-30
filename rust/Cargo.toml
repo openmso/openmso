@@ -1,18 +1,18 @@
 [workspace]
 resolver = "2"
-members = ["demo", "omso-cli"]
-# Still on OCP v0 and excluded until their phase-2 port; the sources are
-# untouched, so re-adding them here is the whole of that change.
-exclude = ["siglent-sds1000xe", "generic-fx2"]
+members = ["demo", "generic-fx2", "omso-cli"]
+# Still on OCP v0 and excluded until its phase-2 port; the sources are
+# untouched, so re-adding it here is the whole of that change.
+exclude = ["siglent-sds1000xe"]
 
 [workspace.package]
 edition = "2021"
 license = "Apache-2.0"
 
 [workspace.dependencies]
-# OCP v1 types, nng transport, CaptureServer/CaptureClient. A path dependency
-# until openmso-api tags a v1 release: a container build needs the sibling
-# checkout inside its context, which packaging/linux/Dockerfile does not do.
-openmso = { path = "../../openmso-api/rust/openmso" }
+# OCP v1 types, nng transport, CaptureServer/CaptureClient. Tracks main until
+# openmso-api tags a v1 release; Cargo.lock pins the exact commit, so
+# `cargo update -p openmso` is what moves it forward.
+openmso = { git = "https://github.com/openmso/openmso-api.git", branch = "main" }
 serde_json = "1"
 libc = "0.2"

@@ -240,14 +240,7 @@ void MainWindow::onConnect()
         return;
     }
 
-    if (pluginName == "demo") {
-        if (!session_->connectDemo(dir)) {
-            // deviceError already emitted.
-        }
-    } else {
-        onDeviceError(tr("Plugin '%1' not wired up yet; v0.1 ships demo only.")
-                          .arg(pluginName));
-    }
+    session_->connectTo(dir, pluginName);
     updateToolbarState();
 }
 

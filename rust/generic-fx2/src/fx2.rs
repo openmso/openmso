@@ -44,8 +44,85 @@ const REENUM_DEADLINE: Duration = Duration::from_secs(5);
 // Let the 8051 boot + trigger USB re-enumeration before polling.
 const REENUM_SETTLE: Duration = Duration::from_millis(300);
 
-pub const VID_SALEAE: u16 = 0x0925;
-pub const PID_SALEAE_LOGIC: u16 = 0x3881;
+/// Which device to drive, from the `--device` URL: `usb://VID:PID`, with an
+/// optional `/BUS.ADDR` to pick between identical units and an optional
+/// `?serial=` to pick by serial number.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Target {
+    pub vid: u16,
+    pub pid: u16,
+    pub bus: Option<u8>,
+    pub address: Option<u8>,
+    pub serial: Option<String>,
+}
+
+impl Target {
+    pub fn parse(url: &str) -> Result<Target, String> {
+        let rest = url
+            .strip_prefix("usb://")
+            .ok_or_else(|| format!("{url:?} is not a usb:// device URL"))?;
+
+        let (rest, serial) = match rest.split_once('?') {
+            Some((head, query)) => {
+                let value = query.strip_prefix("serial=").ok_or_else(|| {
+                    format!("{query:?} is not a supported query; expected serial=")
+                })?;
+                (head, Some(value.to_string()))
+            }
+            None => (rest, None),
+        };
+
+        let (ids, path) = match rest.split_once('/') {
+            Some((ids, path)) => (ids, Some(path)),
+            None => (rest, None),
+        };
+        let (vid, pid) = ids
+            .split_once(':')
+            .ok_or_else(|| format!("{ids:?} is not a VID:PID pair"))?;
+        let vid = u16::from_str_radix(vid, 16).map_err(|_| format!("bad vendor id {vid:?}"))?;
+        let pid = u16::from_str_radix(pid, 16).map_err(|_| format!("bad product id {pid:?}"))?;
+
+        let (bus, address) = match path {
+            None | Some("") => (None, None),
+            Some(path) => {
+                let (b, a) = path
+                    .split_once('.')
+                    .ok_or_else(|| format!("{path:?} is not a BUS.ADDRESS pair"))?;
+                let b = b.parse().map_err(|_| format!("bad bus {b:?}"))?;
+                let a = a.parse().map_err(|_| format!("bad address {a:?}"))?;
+                (Some(b), Some(a))
+            }
+        };
+
+        Ok(Target { vid, pid, bus, address, serial })
+    }
+
+    fn matches(&self, di: &nusb::DeviceInfo) -> bool {
+        if di.vendor_id() != self.vid || di.product_id() != self.pid {
+            return false;
+        }
+        if let (Some(bus), Some(address)) = (self.bus, self.address) {
+            if di.busnum() != bus || di.device_address() != address {
+                return false;
+            }
+        }
+        match &self.serial {
+            Some(serial) => di.serial_number() == Some(serial.as_str()),
+            None => true,
+        }
+    }
+
+    /// After a firmware upload the device re-enumerates at a new bus address,
+    /// so identity narrows to VID:PID (and serial, which survives).
+    fn matches_after_reset(&self, di: &nusb::DeviceInfo) -> bool {
+        di.vendor_id() == self.vid
+            && di.product_id() == self.pid
+            && match &self.serial {
+                Some(serial) => di.serial_number() == Some(serial.as_str()),
+                None => true,
+            }
+    }
+}
 
 /// Sample rates supported by fx2lafw, all dividing 48 MHz (so all use the
 /// 48 MHz IFCLK). Sanity: 24M→delay 1, 1M→47, 20k→2399 (all fit u16).
@@ -57,15 +134,6 @@ pub const SAMPLE_RATES: &[u32] = &[
 
 pub const DEFAULT_SAMPLERATE: u32 = 1_000_000;
 pub const DEFAULT_LIMIT_SAMPLES: u64 = 1_000_000;
-
-/// An fx2lafw-compatible device spotted on the bus.
-#[derive(Debug, Clone)]
-pub struct DeviceId {
-    pub bus: u8,
-    pub address: u8,
-    pub vid: u16,
-    pub pid: u16,
-}
 
 /// Open FX2 device: claimed interface 0 + open EP2 bulk-IN endpoint.
 /// Public fields expose device identity for diagnostics / NOTES.
@@ -80,6 +148,7 @@ pub struct Fx2 {
     pub revid: u8,
     pub bus: u8,
     pub address: u8,
+    pub serial: String,
 }
 
 /// Result of one bulk read iteration.
@@ -99,56 +168,19 @@ enum FwState {
     Other(String),
 }
 
-pub fn list_known() -> Vec<DeviceId> {
-    let mut out = Vec::new();
-    let Ok(list) = nusb::list_devices().wait() else { return out };
-    for di in list {
-        if is_known(di.vendor_id(), di.product_id()) {
-            out.push(DeviceId {
-                bus: di.busnum(),
-                address: di.device_address(),
-                vid: di.vendor_id(),
-                pid: di.product_id(),
-            });
-        }
-    }
-    out
-}
-
-fn is_known(vid: u16, pid: u16) -> bool {
-    matches!((vid, pid), (VID_SALEAE, PID_SALEAE_LOGIC))
-}
-
 impl Fx2 {
-    /// Open the Saleae clone (0925:3881), uploading firmware if it's in the
+    /// Open the device `target` names, uploading firmware if it is in the
     /// bootloader state. After return, the device is in capture-firmware mode,
     /// interface 0 is claimed, and the EP2 bulk-IN endpoint is open.
-    pub fn open() -> Result<Self, String> {
-        let first = list_known().into_iter().next()
-            .ok_or_else(|| "no fx2lafw-compatible USB device found (expected \
-                            0925:3881 Saleae Logic)".to_string())?;
-        Self::open_at(&first)
-    }
-
-    /// Like `open` but limited to a specific bus/address (from `scan`).
-    pub fn open_target(bus: u8, address: u8) -> Result<Self, String> {
-        let target = list_known().into_iter()
-            .find(|d| d.bus == bus && d.address == address)
-            .ok_or_else(|| format!("no fx2lafw device at {bus:03}:{address:03}"))?;
-        Self::open_at(&target)
-    }
-
-    fn open_at(target: &DeviceId) -> Result<Self, String> {
-        let bus = target.bus;
-        let address = target.address;
+    pub fn open(target: &Target) -> Result<Self, String> {
         let di = nusb::list_devices().wait()
             .map_err(|e| format!("enumerate: {e}"))?
-            .find(|d| d.busnum() == target.bus
-                       && d.device_address() == target.address
-                       && d.vendor_id() == target.vid
-                       && d.product_id() == target.pid)
-            .ok_or_else(|| format!("device {:03}:{:03} vanished before open",
-                                   target.bus, target.address))?;
+            .find(|d| target.matches(d))
+            .ok_or_else(|| format!("no device matching {:04x}:{:04x} on the bus",
+                                   target.vid, target.pid))?;
+        let bus = di.busnum();
+        let address = di.device_address();
+        let serial = di.serial_number().unwrap_or_default().to_string();
         let dev = di.open().wait().map_err(|e| format!("open: {e}"))?;
         let intf = dev.claim_interface(0).wait()
             .map_err(|e| format!("claim interface 0: {e}"))?;
@@ -157,15 +189,15 @@ impl Fx2 {
             Ok(v) => {
                 let (ep_in, ep_in_addr) = Self::open_bulk_in(&intf)?;
                 let revid = Self::get_revid(&intf).unwrap_or(0);
-                Ok(Fx2 { dev, intf, ep_in, ep_in_addr,
-                         samplerate: 0, fw_version: v, revid, bus, address })
+                Ok(Fx2 { dev, intf, ep_in, ep_in_addr, samplerate: 0,
+                         fw_version: v, revid, bus, address, serial })
             }
             Err(FwState::Bootloader) => {
                 let (_, fw_bytes) = firmware::locate()?;
                 Self::upload_firmware(&intf, &fw_bytes)?;
                 drop(intf);
                 drop(dev);
-                Self::wait_and_open_after_reset()
+                Self::wait_and_open_after_reset(target)
             }
             Err(FwState::Other(e)) => Err(e),
         }
@@ -174,7 +206,7 @@ impl Fx2 {
     /// After firmware upload + reset release, the device re-enumerates at a
     /// (likely) new bus address. Poll for a known VID:PID, open it, probe
     /// firmware: repeat until the firmware answers or the deadline expires.
-    fn wait_and_open_after_reset() -> Result<Self, String> {
+    fn wait_and_open_after_reset(target: &Target) -> Result<Self, String> {
         let deadline = Instant::now() + REENUM_DEADLINE;
         thread::sleep(REENUM_SETTLE);
         while Instant::now() < deadline {
@@ -183,9 +215,10 @@ impl Fx2 {
                 continue;
             };
             for di in list {
-                if !is_known(di.vendor_id(), di.product_id()) { continue }
+                if !target.matches_after_reset(&di) { continue }
                 let bus = di.busnum();
                 let address = di.device_address();
+                let serial = di.serial_number().unwrap_or_default().to_string();
                 // Try open + claim + probe. Any failure means the device is
                 // in a transitional state — drop handles and retry next tick.
                 let dev = match di.open().wait() { Ok(d) => d, Err(_) => continue };
@@ -198,7 +231,7 @@ impl Fx2 {
                         let revid = Self::get_revid(&intf).unwrap_or(0);
                         return Ok(Fx2 { dev, intf, ep_in, ep_in_addr,
                                          samplerate: 0, fw_version: v, revid,
-                                         bus, address });
+                                         bus, address, serial });
                     }
                     Err(FwState::Bootloader) => continue, // reset didn't take
                     Err(FwState::Other(_)) => continue,
@@ -388,5 +421,30 @@ mod tests {
     fn rejects_non_divisor() {
         assert_eq!(encode_start(7), None);
         assert_eq!(encode_start(0), None);
+    }
+
+    #[test]
+    fn device_urls_name_a_vid_pid_and_optionally_one_unit() {
+        let bare = Target::parse("usb://0925:3881").unwrap();
+        assert_eq!((bare.vid, bare.pid), (0x0925, 0x3881));
+        assert_eq!((bare.bus, bare.address), (None, None));
+        assert_eq!(bare.serial, None);
+
+        let addressed = Target::parse("usb://0925:3881/3.9").unwrap();
+        assert_eq!((addressed.bus, addressed.address), (Some(3), Some(9)));
+
+        let by_serial = Target::parse("usb://0925:3881?serial=ABC123").unwrap();
+        assert_eq!(by_serial.serial.as_deref(), Some("ABC123"));
+
+        // A trailing slash is the same as naming no unit at all.
+        assert_eq!(Target::parse("usb://0925:3881/").unwrap(), bare);
+    }
+
+    #[test]
+    fn a_url_this_plugin_cannot_drive_is_rejected() {
+        for url in ["demo://0", "tcp://192.168.1.155:5025", "usb://0925",
+                    "usb://zzzz:3881", "usb://0925:3881/3", "usb://0925:3881?x=1"] {
+            assert!(Target::parse(url).is_err(), "{url} should not parse");
+        }
     }
 }

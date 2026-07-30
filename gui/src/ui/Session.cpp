@@ -1,25 +1,41 @@
 #include "Session.h"
 
+#include <openmso/encoding.h>
+
 #include "data/AnalogSegment.h"
 #include "data/LogicSegment.h"
 #include "data/Signal.h"
 #include "ocp/PluginManifest.h"
 
-#include <QJsonArray>
-
 namespace openmso::ui {
 
 namespace {
 
-data::AnalogDType parseDType(const QString &s)
+namespace pb = ::openmso::pb;
+
+data::AnalogDType dtypeOf(pb::SampleType type)
 {
-    if (s == "int8")    return data::AnalogDType::Int8;
-    if (s == "uint8")   return data::AnalogDType::UInt8;
-    if (s == "int16")   return data::AnalogDType::Int16;
-    if (s == "uint16")  return data::AnalogDType::UInt16;
-    if (s == "float32") return data::AnalogDType::Float32;
-    if (s == "float64") return data::AnalogDType::Float64;
-    return data::AnalogDType::Int8;
+    switch (type) {
+    case pb::SAMPLE_UINT8:   return data::AnalogDType::UInt8;
+    case pb::SAMPLE_INT16:   return data::AnalogDType::Int16;
+    case pb::SAMPLE_UINT16:  return data::AnalogDType::UInt16;
+    case pb::SAMPLE_FLOAT32: return data::AnalogDType::Float32;
+    case pb::SAMPLE_FLOAT64: return data::AnalogDType::Float64;
+    default:                 return data::AnalogDType::Int8;
+    }
+}
+
+QString summarise(const pb::HelloResult &hello, const QString &device)
+{
+    const auto &d = hello.device();
+    QStringList parts;
+    if (!d.vendor().empty())
+        parts << QString::fromStdString(d.vendor());
+    if (!d.model().empty())
+        parts << QString::fromStdString(d.model());
+    if (parts.isEmpty())
+        parts << QString::fromStdString(hello.plugin().name());
+    return device + " " + parts.join(' ');
 }
 
 } // namespace
@@ -27,256 +43,266 @@ data::AnalogDType parseDType(const QString &s)
 Session::Session(QObject *parent)
     : QObject(parent), capture_(new data::Capture(this)) {}
 
-bool Session::attachClient(ocp::PluginClient *client)
+bool Session::connectTo(const QString &pluginsDir, const QString &pluginName,
+                        const QString &device)
 {
-    if (client_)
-        disconnectFromPlugin();
-    client_ = client;
-    if (client_) {
-        client_->setParent(this);
-        connect(client_, &ocp::PluginClient::notification,
-                this, &Session::handleNotification);
-        connect(client_, &ocp::PluginClient::disconnected,
-                this, [this]{ emit deviceError(QStringLiteral("plugin disconnected")); });
+    const auto manifest = ocp::findPlugin(pluginsDir, pluginName);
+    if (manifest.isNull()) {
+        emit deviceError(tr("plugin '%1' not found under %2")
+                             .arg(pluginName, pluginsDir));
+        return false;
     }
-    return client_ != nullptr;
+
+    QStringList candidates;
+    if (device.isEmpty())
+        candidates = ocp::candidateDeviceUrls(manifest);
+    else
+        candidates << device;
+
+    if (candidates.isEmpty()) {
+        emit deviceError(tr("%1 declares no device this frontend can address")
+                             .arg(pluginName));
+        return false;
+    }
+
+    QStringList failures;
+    for (const QString &candidate : candidates) {
+        QString error;
+        if (tryConnect(manifest, candidate, &error))
+            return true;
+        failures << tr("%1: %2").arg(candidate, error);
+    }
+
+    emit deviceError(failures.join(QStringLiteral("\n")));
+    return false;
 }
 
-bool Session::connectDemo(const QString &pluginsDir)
+bool Session::tryConnect(const ocp::PluginManifest &manifest,
+                         const QString &device, QString *error)
 {
-    auto manifest = openmso::ocp::findPlugin(pluginsDir, QStringLiteral("demo"));
-    if (manifest.name.isEmpty()) {
-        emit deviceError(QStringLiteral("demo plugin not found under %1")
-                             .arg(pluginsDir));
+    auto *client = ocp::PluginClient::launch(manifest, device, error, this);
+    if (!client)
         return false;
-    }
-    auto *c = openmso::ocp::PluginClient::launch(manifest, this);
-    if (!c) {
-        emit deviceError(QStringLiteral("failed to launch demo plugin"));
-        return false;
-    }
-    attachClient(c);
+
+    client_ = client;
+    device_ = device;
+    connect(client_, &ocp::PluginClient::event, this, &Session::onEvent);
+    connect(client_, &ocp::PluginClient::streamFailed, this,
+            [this](const QString &what) { emit deviceError(what); });
 
     try {
-        c->initialize();
-        const auto scan = c->request(QStringLiteral("scan"));
-        const auto devices = scan.value("devices").toArray();
-        if (devices.isEmpty()) {
-            emit deviceError(QStringLiteral("demo returned no devices"));
-            return false;
-        }
-        deviceId_ = devices.first().toObject().value("device_id").toString();
-        c->request(QStringLiteral("open"),
-                   QJsonObject{{"device_id", deviceId_}});
+        const auto hello = client_->hello(QStringLiteral("omso"),
+                                          QStringLiteral("0.1.0"));
+        const auto description = client_->describe();
 
-        // Pre-create the signal list from describe() so the view has
-        // something to show before capture.begin. capture.begin will
-        // create segments and attach them to these signals.
-        const auto desc = c->request(QStringLiteral("describe"));
-    QList<data::Capture::ChannelSpec> specs;
-        const auto channels = desc.value("channels").toArray();
+        QList<data::Capture::ChannelSpec> specs;
         int analogOrd = 0, logicOrd = 0;
-        for (const auto &v : channels) {
-            const auto ch = v.toObject();
-            const bool analog = ch.value("kind").toString() == "analog";
-            specs.append({ch.value("id").toString(),
-                          ch.value("name").toString(),
+        for (const auto &channel : description.channels()) {
+            const bool analog = channel.kind() == pb::CHANNEL_ANALOG;
+            specs.append({QString::fromStdString(channel.id()),
+                          QString::fromStdString(channel.name()),
                           analog ? data::SignalKind::Analog
                                  : data::SignalKind::Logic,
                           analog ? analogOrd++ : logicOrd++});
         }
-        capture_->declareChannels(specs);  // show channels; stay Idle
-        emit deviceReady(QStringLiteral("demo://0 Demo MSO"));
+        capture_->declareChannels(specs);
+
+        emit deviceReady(summarise(hello, device));
         return true;
-    } catch (const openmso::ocp::PluginError &e) {
-        emit deviceError(QString::fromStdString(e.what()));
+    } catch (const ::openmso::Error &e) {
+        *error = QString::fromUtf8(e.what());
+        disconnectFromPlugin();
         return false;
     }
 }
 
-qint64 Session::startCapture()
+quint64 Session::startCapture(bool continuous)
 {
-    if (!client_) return -1;
+    if (!client_)
+        return 0;
     try {
-        const auto r = client_->request(
-            QStringLiteral("acquire.start"),
-            QJsonObject{{"mode", QStringLiteral("single")}});
-        return r.value("capture_id").toVariant().toLongLong();
-    } catch (const openmso::ocp::PluginError &e) {
-        emit deviceError(QString::fromStdString(e.what()));
-        return -1;
+        segmentsReady_ = false;
+        captureId_ = client_->acquireStart(continuous ? pb::ACQUIRE_CONTINUOUS
+                                                      : pb::ACQUIRE_SINGLE);
+        return captureId_;
+    } catch (const ::openmso::Error &e) {
+        emit deviceError(QString::fromUtf8(e.what()));
+        return 0;
     }
 }
 
 void Session::stopCapture()
 {
-    if (!client_) return;
+    if (!client_ || captureId_ == 0)
+        return;
     try {
-        client_->request(QStringLiteral("acquire.stop"));
-    } catch (const openmso::ocp::PluginError &e) {
-        emit deviceError(QString::fromStdString(e.what()));
+        client_->acquireStop(captureId_);
+    } catch (const ::openmso::Error &e) {
+        emit deviceError(QString::fromUtf8(e.what()));
     }
 }
 
 void Session::disconnectFromPlugin()
 {
     streams_.clear();
+    captureId_ = 0;
     if (client_) {
-        // Detach our slots first. shutdown() closes the io device, which
-        // emits disconnected() synchronously; if that still reached our
-        // lambda it would emit deviceError() → MainWindow deletes this
-        // Session while shutdown() is on the stack (use-after-free).
+        // Detach first: shutdown() can emit, and a deviceError() from here
+        // would let MainWindow delete this Session while it is on the stack.
         disconnect(client_, nullptr, this, nullptr);
         client_->shutdown();
+        client_->deleteLater();
         client_ = nullptr;
     }
 }
 
-// ---- notification dispatch --------------------------------------------
-
-void Session::handleNotification(const QString &method,
-                                 const QJsonObject &params,
-                                 const QByteArray &payload)
+void Session::onEvent(const pb::Event &event)
 {
-    if (method == "capture.begin") onCaptureBegin(params);
-    else if (method == "capture.data") onCaptureData(params, payload);
-    else if (method == "capture.trigger") onCaptureTrigger(params);
-    else if (method == "capture.end") onCaptureEnd(params);
-    // Other notifications (event.status, log) ignored at v0.1.
+    switch (event.event_case()) {
+    case pb::Event::kCaptureBegin:     onCaptureBegin(event.capture_begin()); break;
+    case pb::Event::kAcquisitionBegin: onAcquisitionBegin(event.acquisition_begin()); break;
+    case pb::Event::kData:             onData(event.data()); break;
+    case pb::Event::kTrigger:          onTrigger(event.trigger()); break;
+    case pb::Event::kCaptureEnd:       onCaptureEnd(event.capture_end()); break;
+    case pb::Event::kDeviceLost:
+        emit deviceError(tr("device lost: %1")
+                             .arg(QString::fromStdString(event.device_lost().reason())));
+        break;
+    default:
+        break;
+    }
 }
 
-void Session::onCaptureBegin(const QJsonObject &params)
+void Session::onCaptureBegin(const pb::CaptureBegin &begin)
 {
-    const double sr = params.value("samplerate").toDouble();
-    const double t0 = params.value("t0").toDouble();
+    if (begin.capture_id() != captureId_)
+        return;
+
+    samplerate_ = begin.samplerate();
+    segmentsReady_ = false;
     streams_.clear();
 
-    // Rebuild the channel list in stream order so segments attach to
-    // the right Signal.
+    for (const auto &stream : begin.streams()) {
+        StreamInfo info;
+        info.logic = stream.has_logic();
+        for (const auto &id : stream.channels())
+            info.channelIds.append(QString::fromStdString(id));
+
+        if (info.logic) {
+            info.unitsize = static_cast<int>(stream.logic().unitsize());
+        } else {
+            const auto &format = stream.analog();
+            info.dtype = dtypeOf(format.type());
+            info.scale = format.scale();
+            info.offset = format.offset();
+            info.unit = QString::fromStdString(format.unit());
+        }
+        streams_.insert(stream.id(), info);
+    }
+}
+
+void Session::onAcquisitionBegin(const pb::AcquisitionBegin &begin)
+{
+    if (begin.capture_id() != captureId_)
+        return;
+
+    // Each acquisition replaces the display: a re-arming scope produces one
+    // per trigger, a streaming device exactly one.
     QList<data::Capture::ChannelSpec> specs;
     int analogOrd = 0;
-    const auto streams = params.value("streams").toArray();
-    for (const auto &v : streams) {
-        const auto s = v.toObject();
-        StreamInfo info;
-        info.stream = s.value("stream").toInt();
-        info.kind = s.value("kind").toString();
-        info.sampleCount = s.value("sample_count").toVariant().toLongLong();
-        const auto chs = s.value("channels").toArray();
-        for (const auto &c : chs)
-            info.channelIds.append(c.toString());
-        const auto enc = s.value("encoding").toObject();
-        if (info.kind == "analog") {
-            info.dtype = parseDType(enc.value("dtype").toString());
-            info.scale = enc.value("scale").toDouble(1.0);
-            info.offset = enc.value("offset").toDouble(0.0);
-            info.unit = enc.value("unit").toString("V");
-        } else {
-            info.unitsize = enc.value("unitsize").toInt(1);
-        }
-        streams_.insert(info.stream, info);
-
-        // Logic bit position within the stream's packed unit; analog
-        // channels take a running scope-color ordinal.
+    for (const auto &info : streams_) {
         int bit = 0;
-        for (const auto &id : info.channelIds) {
-            if (info.kind == "analog")
-                specs.append({id, id, data::SignalKind::Analog, analogOrd++});
-            else
+        for (const QString &id : info.channelIds) {
+            if (info.logic)
                 specs.append({id, id, data::SignalKind::Logic, bit++});
+            else
+                specs.append({id, id, data::SignalKind::Analog, analogOrd++});
         }
     }
 
-    capture_->beginCapture(sr, t0, specs);
+    capture_->beginCapture(samplerate_, begin.t0(), specs);
 
-    // Now create segments on each signal. For a logic stream, every
-    // channel signal gets its own LogicSegment that holds the same
-    // bit-packed bytes (the painter reads only "its" bit out of each
-    // byte). This is slightly wasteful in memory (8× the bytes for an
-    // 8-channel stream) but trivial for the demo's 100k samples and
-    // keeps the data model simple: one Signal → one Segment. A future
-    // optimization can share the segment across sibling signals.
-    for (auto it = streams_.begin(); it != streams_.end(); ++it) {
-        const auto &info = it.value();
-        for (const auto &id : info.channelIds) {
-            auto *sig = capture_->signalById(id);
-            if (!sig) continue;
-            if (info.kind == "logic") {
-                auto *seg = new data::LogicSegment(
-                    info.unitsize, info.channelIds.size(), sig);
-                seg->setSamplerate(sr);
-                sig->appendSegment(seg);
+    // One Segment per Signal: sibling logic channels each hold the same
+    // packed bytes and read only their own bit out of them.
+    for (const auto &info : streams_) {
+        for (const QString &id : info.channelIds) {
+            auto *signal = capture_->signalById(id);
+            if (!signal)
+                continue;
+            data::Segment *segment = nullptr;
+            if (info.logic) {
+                segment = new data::LogicSegment(info.unitsize,
+                                                 info.channelIds.size(), signal);
             } else {
-                auto *seg = new data::AnalogSegment(
-                    info.dtype, info.scale, info.offset, info.unit, sig);
-                seg->setSamplerate(sr);
-                sig->appendSegment(seg);
+                segment = new data::AnalogSegment(info.dtype, info.scale,
+                                                  info.offset, info.unit, signal);
             }
+            segment->setSamplerate(samplerate_);
+            signal->appendSegment(segment);
         }
     }
+
+    segmentsReady_ = true;
+    capture_->markCapturing();
 }
 
-void Session::onCaptureData(const QJsonObject &params,
-                            const QByteArray &payload)
+void Session::onData(const pb::CaptureData &data)
 {
-    const int stream = params.value("stream").toInt();
-    const qint64 firstSample =
-        params.value("first_sample").toVariant().toLongLong();
-    const qint64 nsamples =
-        params.value("nsamples").toVariant().toLongLong();
+    if (data.capture_id() != captureId_ || !segmentsReady_)
+        return;
 
-    // Fan out to every signal in the stream. For logic streams each
-    // signal has its own (duplicate) segment; for analog streams there
-    // is exactly one signal per stream.
-    auto it = streams_.find(stream);
-    if (it == streams_.end()) return;
-    const auto &info = it.value();
-    for (const auto &id : info.channelIds) {
-        auto *sig = capture_->signalById(id);
-        if (!sig) continue;
-        auto *seg = sig->primarySegment();
-        if (info.kind == "logic") {
-            if (auto *l = qobject_cast<data::LogicSegment *>(seg))
-                l->appendChunk(payload, firstSample, nsamples);
+    auto it = streams_.find(data.stream());
+    if (it == streams_.end())
+        return;
+    const StreamInfo &info = *it;
+
+    const std::size_t unitsize =
+        info.logic ? static_cast<std::size_t>(info.unitsize)
+                   : static_cast<std::size_t>(data::bytesPerSample(info.dtype));
+
+    QByteArray packed;
+    try {
+        std::string scratch;
+        const auto view = ::openmso::encoding::decodePayload(data, unitsize, scratch);
+        packed = QByteArray(view.data, static_cast<qsizetype>(view.size));
+    } catch (const ::openmso::Error &e) {
+        emit deviceError(QString::fromUtf8(e.what()));
+        return;
+    }
+
+    const auto firstSample = static_cast<qint64>(data.first_sample());
+    const auto nsamples = static_cast<qint64>(data.sample_count());
+
+    for (const QString &id : info.channelIds) {
+        auto *signal = capture_->signalById(id);
+        if (!signal)
+            continue;
+        auto *segment = signal->primarySegment();
+        if (info.logic) {
+            if (auto *l = qobject_cast<data::LogicSegment *>(segment))
+                l->appendChunk(packed, firstSample, nsamples);
         } else {
-            if (auto *a = qobject_cast<data::AnalogSegment *>(seg))
-                a->appendChunk(payload, firstSample, nsamples);
+            if (auto *a = qobject_cast<data::AnalogSegment *>(segment))
+                a->appendChunk(packed, firstSample, nsamples);
         }
     }
-    capture_->notifyAppend(stream, firstSample, nsamples);
+    capture_->notifyAppend(data.stream(), firstSample, nsamples);
 }
 
-void Session::onCaptureTrigger(const QJsonObject &params)
+void Session::onTrigger(const pb::CaptureTrigger &trigger)
 {
-    const qint64 sample = params.value("sample").toVariant().toLongLong();
-    capture_->setTriggerSample(sample);
+    if (trigger.capture_id() == captureId_)
+        capture_->setTriggerSample(static_cast<qint64>(trigger.sample()));
 }
 
-void Session::onCaptureEnd(const QJsonObject &params)
+void Session::onCaptureEnd(const pb::CaptureEnd &end)
 {
-    const bool ok = params.value("ok").toBool(true);
-    const QString err = params.value("error").toString();
-    capture_->endCapture(ok, err);
-}
-
-Session::StreamTarget Session::resolveStream(int streamIndex) const
-{
-    StreamTarget t;
-    auto it = streams_.find(streamIndex);
-    if (it == streams_.end()) return t;
-    const auto &info = it.value();
-    for (const auto &id : info.channelIds) {
-        auto *sig = capture_->signalById(id);
-        if (!sig) continue;
-        t.signal = sig;
-        auto *seg = sig->primarySegment();
-        if (info.kind == "logic")
-            t.logic = qobject_cast<data::LogicSegment *>(seg);
-        else
-            t.analog = qobject_cast<data::AnalogSegment *>(seg);
-        if (t.logic || t.analog) return t;
-    }
-    return t;
+    if (end.capture_id() != captureId_)
+        return;
+    if (end.has_error())
+        capture_->endCapture(false, QString::fromStdString(end.error().message()));
+    else
+        capture_->endCapture(true);
 }
 
 } // namespace openmso::ui

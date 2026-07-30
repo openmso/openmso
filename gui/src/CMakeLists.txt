@@ -124,15 +124,11 @@ set_target_properties(openmso-view PROPERTIES
     POSITION_INDEPENDENT_CODE ON
 )
 
-# OCP client library (added in M1).
+# OCP client library: Qt bindings over the openmso-api C++ library.
 
 add_library(openmso-ocp STATIC
-    ocp/MessageStream.cpp
-    ocp/MessageStream.h
     ocp/PluginClient.cpp
     ocp/PluginClient.h
-    ocp/PluginError.cpp
-    ocp/PluginError.h
     ocp/PluginManifest.cpp
     ocp/PluginManifest.h
 )
@@ -142,8 +138,8 @@ target_include_directories(openmso-ocp PUBLIC
 )
 
 target_link_libraries(openmso-ocp PUBLIC
+    openmso::openmso
     Qt6::Core
-    Qt6::Network
 )
 
 set_target_properties(openmso-ocp PROPERTIES
