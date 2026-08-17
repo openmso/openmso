@@ -1,8 +1,7 @@
 #pragma once
 
 #include <QColor>
-
-class QPalette;
+#include <QPalette>
 
 namespace openmso::util {
 
@@ -13,6 +12,10 @@ enum class Theme { Light, Dark };
 
 // Detect the effective theme from a widget palette (window lightness).
 Theme themeFor(const QPalette &palette);
+
+// The dark palette the app installs when the desktop asks for dark and the
+// platform theme has not supplied one of its own.
+QPalette darkPalette();
 
 // Logic channel color by channel index (the "D" number). Follows the
 // decimal resistor color code starting at black: 0=black, 1=brown,

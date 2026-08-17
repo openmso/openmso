@@ -12,6 +12,30 @@ Theme themeFor(const QPalette &palette)
                : Theme::Light;
 }
 
+QPalette darkPalette()
+{
+    // Matches docs/gui-plan/tools/dark_render.cpp, which the progress
+    // screenshots were rendered against.
+    const QColor window(45, 45, 50), base(30, 30, 34), text(220, 220, 225);
+    const QColor disabled(120, 120, 128), highlight(38, 110, 180);
+
+    QPalette p;
+    p.setColor(QPalette::Window, window);
+    p.setColor(QPalette::Base, base);
+    p.setColor(QPalette::AlternateBase, window);
+    p.setColor(QPalette::Button, window);
+    p.setColor(QPalette::ToolTipBase, base);
+    p.setColor(QPalette::WindowText, text);
+    p.setColor(QPalette::Text, text);
+    p.setColor(QPalette::ButtonText, text);
+    p.setColor(QPalette::ToolTipText, text);
+    p.setColor(QPalette::Highlight, highlight);
+    p.setColor(QPalette::HighlightedText, text);
+    for (auto role : {QPalette::WindowText, QPalette::Text, QPalette::ButtonText})
+        p.setColor(QPalette::Disabled, role, disabled);
+    return p;
+}
+
 QColor logicColor(int channelIndex, Theme theme)
 {
     // Decimal resistor code 0..7 (black, brown, red, orange, yellow,

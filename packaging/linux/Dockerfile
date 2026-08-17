@@ -1,5 +1,5 @@
-ARG BUILD_IMAGE=debian:bookworm
-ARG RUNTIME_IMAGE=debian:bookworm-slim
+ARG BUILD_IMAGE=debian:trixie
+ARG RUNTIME_IMAGE=debian:trixie-slim
 
 FROM ${BUILD_IMAGE} AS build
 
@@ -34,7 +34,9 @@ RUN set -eu; \
     strip "${stage}/bin/omso" "${stage}/bin/omso-cli" "${stage}/plugins/demo/demo"; \
     sed -e 's|"run": \[.*\]|"run": ["./demo"]|' -e '/"build":/d' \
         plugins/demo/plugin.json > "${stage}/plugins/demo/plugin.json"; \
-    cp LICENSE README.md packaging/linux/NOTICE.md "${stage}/"; \
+    cp README.md packaging/linux/NOTICE.md "${stage}/"; \
+    cp packaging/linux/COPYING "${stage}/COPYING"; \
+    cp LICENSE "${stage}/LICENSE.Apache-2.0"; \
     tar -C /stage --owner=0 --group=0 -czf "/out/${name}.tar.gz" "${name}"; \
     cd /out && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256"
 
@@ -46,11 +48,11 @@ ARG VERSION=0.0.1
 ARG TARGET=x86_64
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Exactly the list NOTICE.md tells a user to install, so a wrong list fails
+# the build rather than the user's first run.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libqt6widgets6 libqt6concurrent6 qt6-qpa-plugins \
-        libnng1 libprotobuf32 \
+        libqt6widgets6 libnng1 libprotobuf32t64 qt6-wayland \
     && rm -rf /var/lib/apt/lists/*
-
 
 COPY --from=build /out/ /tmp/dist/
 
@@ -69,6 +71,13 @@ RUN set -eu; \
         capture -o /tmp/smoke.sr --csv /tmp/smoke.csv; \
     test -s /tmp/smoke.sr; \
     test -s /tmp/smoke.csv; \
+    # The binaries are GPL-3.0-or-later as distributed, so the text travels
+    # with them; the Apache notice covers the sources they were built from.
+    test -s "${root}/COPYING"; \
+    test -s "${root}/LICENSE.Apache-2.0"; \
+    # No compositor here to run against, so the check is that the package
+    # providing the Wayland platform plugin was one a user is told to install.
+    test -e /usr/lib/*-linux-gnu/qt6/plugins/platforms/libqwayland-generic.so; \
     # A GUI still alive when timeout fires (124) started cleanly; any other
     # status means it failed to open a display or load its platform plugin.
     QT_QPA_PLATFORM=offscreen timeout 10 "${root}/bin/omso" \

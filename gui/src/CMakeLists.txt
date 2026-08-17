@@ -177,6 +177,8 @@ target_link_libraries(omso PRIVATE
     Qt6::Core
     Qt6::Gui
     Qt6::Widgets
+    # main.cpp reads the desktop's colour scheme from the XDG portal.
+    Qt6::DBus
 )
 
 set_target_properties(omso PROPERTIES
