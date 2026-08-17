@@ -1,6 +1,0 @@
-{
-    "name": "pico",
-    "description": "Raspberry Pi Pico family mixed-signal device (OpenMSO Pico firmware)",
-    "run": ["{python}", "plugin.py"],
-    "license": "Apache-2.0"
-}

@@ -1,0 +1,11 @@
+# OpenMSO Pico udev rules — grant non-root access to the device and to the
+# RP2 BOOTSEL mass-storage device (for picotool), without dialout membership.
+#
+# Install (one time, no logout needed):
+#   sudo cp tools/99-openmso-pico.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#
+# The OpenMSO Pico CDC port (VID:PID 1209:0001) -> world r/w + stable symlink.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="0001", MODE="0666", SYMLINK+="openmso-pico"
+# RP2 devices in BOOTSEL mode (VID 2e8a) -> accessible to picotool.
+SUBSYSTEM=="usb", ATTRS{idVendor}=="2e8a", MODE="0666"

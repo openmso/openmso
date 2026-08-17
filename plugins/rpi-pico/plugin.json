@@ -1,0 +1,16 @@
+{
+    "name": "rpi-pico",
+    "description": "Raspberry Pi Pico family running the OpenMSO Pico firmware",
+    "vendor": "OpenMSO",
+    "version": "0.1.0",
+    "license": "Apache-2.0",
+    "run": ["../../rust/target/release/rpi-pico"],
+    "build": "cargo build --release   (run in rust/)",
+    "urlSchemes": ["serial", "usb"],
+    "usbIds": [
+        {"id": "1209:0001", "note": "OpenMSO Pico firmware CDC port"}
+    ],
+    "palette": {
+        "analog": ["COLOR_YELLOW", "COLOR_MAGENTA", "COLOR_CYAN"]
+    }
+}

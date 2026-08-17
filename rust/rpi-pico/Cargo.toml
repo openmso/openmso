@@ -1,0 +1,11 @@
+[package]
+name = "rpi-pico"
+version = "0.1.0"
+description = "OpenMSO capture plugin for Raspberry Pi Pico boards running the OpenMSO Pico firmware"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+openmso.workspace = true
+serde_json.workspace = true
+libc.workspace = true

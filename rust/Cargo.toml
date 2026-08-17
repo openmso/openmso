@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["demo", "generic-fx2", "omso-cli"]
+members = ["demo", "generic-fx2", "omso-cli", "rpi-pico"]
 # Still on OCP v0 and excluded until its phase-2 port; the sources are
 # untouched, so re-adding it here is the whole of that change.
 exclude = ["siglent-sds1000xe"]
